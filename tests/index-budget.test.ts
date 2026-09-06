@@ -12,7 +12,7 @@ test("oversized source is rejected before any blobs are downloaded", async () =>
     blobs++;
     throw new Error("Unexpected blob read");
   };
-  await assert.rejects(github.snapshot("owner/repo", "main", 1), /2 MB/);
+  await assert.rejects(github.snapshot("owner/repo", "main", 1), /4\.0 MB.*2 MB/);
   assert.equal(blobs, 0);
 });
 
