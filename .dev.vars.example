@@ -1,0 +1,10 @@
+# Copy to .dev.vars for local Wrangler only. Never commit live values.
+DATA_KEY=replace-with-64-hex-characters
+JWKS_URL=https://identity.example/.well-known/jwks.json
+ISSUER=https://identity.example/
+AUDIENCE=https://caelogram.example
+GITHUB_APP_ID=replace-with-app-id
+GITHUB_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\nreplace\n-----END RSA PRIVATE KEY-----"
+GITHUB_WEBHOOK_SECRET=replace-with-random-secret
+# PUBLIC_ORIGIN=http://localhost:8787
+# INSTALLATIONS={"tenant-id":[123456]}

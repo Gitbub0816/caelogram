@@ -1,0 +1,15 @@
+node_modules/
+dist/
+public/
+.data/
+.env
+.env.*
+!.env.example
+*.db*
+coverage/
+.caelogram/
+.wrangler/
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.impeccable/

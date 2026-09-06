@@ -1,0 +1,36 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "caelogram",
+  "main": "cloudflare/worker.ts",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "define": {
+    "__filename": "\"/bundle/worker.js\"",
+    "__dirname": "\"/bundle\"",
+  },
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": true,
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "caelogram",
+      "migrations_dir": "cloudflare/migrations",
+    },
+  ],
+  "r2_buckets": [{ "binding": "SOURCE", "bucket_name": "caelogram-private" }],
+  "triggers": { "crons": ["* * * * *"] },
+  "observability": { "enabled": true },
+  "limits": { "cpu_ms": 30000 },
+  "ratelimits": [
+    {
+      "name": "REQUEST_LIMIT",
+      "namespace_id": "1001",
+      "simple": { "limit": 120, "period": 60 },
+    },
+  ],
+  "vars": { "PUBLIC_ORIGIN": "", "INSTALLATIONS": "{}" },
+}
