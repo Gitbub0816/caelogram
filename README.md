@@ -15,7 +15,7 @@ npm ci
 npm run dev
 ```
 
-Open `http://localhost:5173`. The initial console maps the included Orbit Shop sample using the actual indexing engine. Task resolution is real; sample publication is disabled. The dev server prints a development-only Caelogram access token for connecting an authenticated session. Do not expose the dev server to the Internet.
+Open `http://localhost:5173`. The initial console maps the included Orbit Shop sample using the actual indexing engine. Task resolution is real; sample publication is disabled. The dev server prints a development-only Caelogram access token; open `/?local=1` to use the legacy development session form. Public onboarding is the default UI; use the Cloudflare adapter and configure Clerk for real browser sign-in. Do not expose the dev server to the Internet.
 
 ```sh
 npm run check
@@ -41,11 +41,10 @@ To use the `caelogram` executable after building, run `npm link` in this checkou
 
 ## Connect GitHub and use the controlled workflow
 
-Configure a GitHub App and bind its installation ID to the authenticated tenant on the server. Then authenticate the CLI with a **Caelogram** token, never a GitHub installation token:
+For the Cloudflare application, follow [Clerk and self-service GitHub setup](docs/authentication.md). Anyone can sign up, authorize the public GitHub App, choose an existing repository and branch, and map it. Create a scoped agent token in Access & integrations, then authenticate the CLI with that **Caelogram** token, never a GitHub token. Map through the browser first; the operator-only `connect --installation` command is for the legacy JWT adapter.
 
 ```sh
 caelogram login --url https://your-caelogram-service.example
-caelogram connect owner/existing-repository --installation 12345 --branch main
 caelogram begin REPOSITORY_ID "Add payment retry handling"
 caelogram submit TASK_ID edits.json --title "Handle payment retries"
 caelogram validate CHANGESET_ID

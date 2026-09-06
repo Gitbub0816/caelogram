@@ -60,7 +60,13 @@ Browser interactions verified: navigation into Task context, resolving the payme
 
 ## Cloudflare and orbital extension — 2026-09-06
 
-All 27 integration/unit tests passed after the async storage port; a subsequent bounded-region pagination test also passed (28 tests total). Strict TypeScript checks pass for Node, browser, and Cloudflare sources. The production browser build and Wrangler dry-run bundle pass. The orbital JavaScript chunk is lazy loaded (~141 KB compressed); the Worker is ~1.9 MB compressed.
+All 30 integration/unit tests pass after adding self-service authentication. Strict TypeScript checks pass for Node, browser, and Cloudflare sources. The production browser build and Wrangler dry-run bundle pass. The orbital JavaScript chunk is lazy loaded (~141 KB compressed); the Worker is ~1.9 MB compressed.
+
+## Self-service account verification
+
+New automated coverage verifies signed Clerk identity mapping, wrong authorized-party rejection, expiration, ignored caller-controlled tenant/grant claims, OAuth browser binding and single-use callback state, encrypted GitHub token rotation, suspended/read-only/archived repository filtering, agent scope restrictions, tenant isolation and expiration. GitHub responses and Clerk signing keys are test fixtures, not live account integration evidence. The actual bundled Worker also serves public configuration and a recoverable callback error page without exposing credentials.
+
+The browser preview confirms the account-first connection entry and preserves the real sample's 24-file orbital and heatmap views. No Clerk application keys were provided, so provider sign-in, embedded Clerk form rendering with the configured providers, and live GitHub installation/PR acceptance remain unverified. Follow the live checklist in [authentication](authentication.md) before opening registration to customers.
 
 The Cloudflare HTTP test executes the actual Wrangler-generated bundle in workerd/Miniflare. It verifies public mapping, task resolution, origin rejection, fail-closed auth, protected-resource discovery and no-store headers. This caught and fixed TypeScript's CommonJS filename assumptions at Worker startup. D1/R2 tests exercise encrypted real storage, tenant-bound AEAD, the complete changeset workflow with a GitHub provider double, duplicate publication, durable mutation locks, audit immutability and offline physical deletion.
 

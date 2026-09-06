@@ -1,5 +1,8 @@
 import React, { useEffect, useState, lazy, Suspense } from "react";
 import { Icon } from "./Icon";
+import type { Identity } from "./Auth";
+import Connect from "./Connect";
+import AgentAccess from "./AgentAccess";
 import { Galaxy, colors, type MapData } from "./Galaxy";
 const OrbitalGalaxy = lazy(() => import("./OrbitalGalaxy"));
 type Item = {
@@ -39,9 +42,19 @@ type Change = {
   };
   pr?: { url: string; number: number };
 };
-export default function App() {
+export default function App({
+  identity,
+  publicMode = false,
+}: {
+  identity?: Identity;
+  publicMode?: boolean;
+}) {
   const [data, setData] = useState<MapData | null>(null),
-    [view, setView] = useState("map"),
+    [view, setView] = useState(
+      new URLSearchParams(location.search).has("connect") || identity?.signedIn
+        ? "connect"
+        : "map",
+    ),
     [selected, setSelected] = useState("src/payments/gateway.ts"),
     [search, setSearch] = useState(""),
     [task, setTask] = useState<Task | null>(null),
@@ -50,7 +63,7 @@ export default function App() {
     [busy, setBusy] = useState(""),
     [error, setError] = useState(""),
     [token, setToken] = useState(""),
-    [session, setSession] = useState(""),
+    [localSession, setSession] = useState(""),
     [repositories, setRepositories] = useState<any[]>([]),
     [demo, setDemo] = useState(true),
     [mapMode, setMapMode] = useState<"orbit" | "heatmap" | "table">("orbit"),
@@ -69,7 +82,9 @@ export default function App() {
     [branch, setBranch] = useState("main"),
     [installation, setInstallation] = useState(""),
     [source, setSource] = useState("");
-  const request = async (path: string, body?: unknown, auth = session) => {
+  const session = identity?.signedIn ? "clerk" : localSession;
+  const request = async (path: string, body?: unknown, auth = localSession) => {
+    if (identity?.signedIn) auth = (await identity.getToken()) ?? "";
     const r = await fetch(path, {
       method: body ? "POST" : "GET",
       headers: {
@@ -247,7 +262,11 @@ export default function App() {
             {demo && <span className="sample-tag">SAMPLE DATA</span>}
             <button
               className="avatar"
-              onClick={() => setView("settings")}
+              onClick={() =>
+                identity
+                  ? location.assign(identity.signedIn ? "/account" : "/sign-in")
+                  : setView("settings")
+              }
               aria-label="Account"
             >
               C
@@ -320,6 +339,8 @@ export default function App() {
               </div>
             </div>
           </section>
+        ) : view === "connect" && (identity || publicMode) ? (
+          <Connect identity={identity} onMapped={loadRepo} />
         ) : view === "connect" ? (
           <section className="page narrow">
             <h1>
@@ -479,16 +500,30 @@ export default function App() {
           <section className="page">
             <h1>Access & integrations</h1>
             <div className="settings-grid">
+              {identity?.signedIn && <AgentAccess identity={identity} />}
               <article>
                 <h2>Session</h2>
+                {identity && (
+                  <p>
+                    <a href={identity.signedIn ? "/account" : "/sign-in"}>
+                      {identity.signedIn ? "Manage your account" : "Sign in"}
+                    </a>
+                  </p>
+                )}
                 <p>
-                  {session
-                    ? "Authenticated. Your token is held only in this page’s memory."
-                    : "Explore the sample or connect an issued Caelogram identity."}
+                  {identity?.signedIn
+                    ? "Signed in securely with Clerk. GitHub repository access is checked separately."
+                    : session
+                      ? "Authenticated. Your token is held only in this page’s memory."
+                      : "Explore the sample or connect an issued Caelogram identity."}
                 </p>
                 <button
                   className="secondary"
                   onClick={() => {
+                    if (identity?.signedIn) {
+                      void identity.signOut();
+                      return;
+                    }
                     setSession("");
                     setRepositories([]);
                     void showDemo();
@@ -540,7 +575,9 @@ export default function App() {
                             "/api/repositories/" + data.id,
                             {
                               method: "DELETE",
-                              headers: { Authorization: `Bearer ${session}` },
+                              headers: {
+                                Authorization: `Bearer ${identity ? await identity.getToken() : localSession}`,
+                              },
                             },
                           );
                           if (!r.ok) throw new Error("Deletion failed");

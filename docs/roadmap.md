@@ -9,13 +9,14 @@
 - Tenant-scoped durable records, JWT scopes/repository claims, optional development token, production encryption requirement.
 - Changeset submission, syntax/import validation, stale-base guards, idempotent draft PR adapter.
 - Fourteen remote MCP tools, CLI, portable agent skill, IDE panel source.
-- Marketing overview, sample demonstration, token-based connection, live repo selection, galaxy, table, context, validation, history, audit, and access/data controls.
+- Marketing overview, sample demonstration, embedded Clerk account screens, self-service GitHub OAuth/installation selection, galaxy, table, context, validation, history, audit, and access/data controls.
+- Personal workspace isolation, live user/App repository grant intersection, encrypted GitHub token rotation, and hashed/revocable 1–8 hour repository-scoped agent credentials.
 - Automated security/workflow tests, real existing-repository mapping benchmarks, labeled synthetic scaling checks, and browser demo verification.
 
 ## Milestone 1: private deployment readiness
 
 1. Register a Caelogram-owned GitHub App; connect a sandbox repository with installation credentials, verify real import → proposed edit → validation → draft PR → webhook reindex. Connector access used by the coding assistant is not equivalent to this product's App installation.
-2. Configure an OAuth/OIDC issuer with correct resource audience, public-client PKCE, compatible registration, refresh/revocation policies, user-to-tenant bindings, and repository-specific grants. Implement browser login/device-flow CLI onboarding. Current token entry is an operator-assisted alpha flow.
+2. Configure Clerk and the public GitHub App using [authentication setup](authentication.md), verify live provider sign-in and two-account isolation. Embedded browser login is implemented; automatic MCP OAuth client registration and CLI device authorization remain deferred.
 3. Move CPU indexing to a constrained worker process; queue initial imports with meaningful progress. Add rate-limit-aware backoff, job dead-letter visibility, cancellation, webhook uninstall/access revocation, and periodic reconciliation.
 4. Add a trustworthy secret scanner and source quarantine, content-addressed extractor versioning, configurable exclusions, prompt-injection tests, and public security documentation. Do not market regex redaction as a guarantee.
 5. Run independent tenant-isolation and authorization review. Add access-token revocation enforcement, per-tenant/request quotas, structured failure logging without source, dependency updates, backup and restore drills, and retention purge (including backups).
