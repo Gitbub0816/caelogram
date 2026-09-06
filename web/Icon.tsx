@@ -1,4 +1,22 @@
 export function Icon({ name = "map" }: { name?: string }) {
+  const orbitalDots = [
+    [2, 12],
+    [3.3, 9.5],
+    [6.1, 7.4],
+    [9.4, 6.1],
+    [12, 5.6],
+    [14.6, 6.1],
+    [17.9, 7.4],
+    [20.7, 9.5],
+    [22, 12],
+    [20.7, 14.5],
+    [17.9, 16.6],
+    [14.6, 17.9],
+    [12, 18.4],
+    [9.4, 17.9],
+    [6.1, 16.6],
+    [3.3, 14.5],
+  ];
   const paths: Record<string, string> = {
     context: "M4 5h16M4 12h10M4 19h13",
     history: "M6 5v14m0-9c10 0 12-1 12-5",
@@ -20,17 +38,11 @@ export function Icon({ name = "map" }: { name?: string }) {
       aria-hidden="true"
     >
       {name === "map" ? (
-        <>
-          <ellipse
-            cx="12"
-            cy="12"
-            rx="10"
-            ry="5"
-            transform="rotate(-35 12 12)"
-          />
-          <circle cx="12" cy="12" r="3" />
-          <circle cx="19" cy="5" r="1" fill="currentColor" stroke="none" />
-        </>
+        <g transform="rotate(-35 12 12)" fill="currentColor" stroke="none">
+          {orbitalDots.map(([cx, cy]) => (
+            <circle key={cx} cx={cx} cy={cy} r="1.18" />
+          ))}
+        </g>
       ) : (
         <>
           <path d={paths[name] || paths.context} />

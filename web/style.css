@@ -150,10 +150,13 @@ pre {
   color: #f6f5f2;
 }
 .brand-mark {
-  font-size: 43px;
-  line-height: 1;
+  display: inline-flex;
+  line-height: 0;
   color: #d6c29a;
-  transform: rotate(-25deg);
+}
+.brand-mark svg {
+  width: 31px;
+  height: 31px;
 }
 .beta {
   color: #a6a091;
