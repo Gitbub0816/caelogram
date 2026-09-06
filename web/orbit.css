@@ -1,0 +1,492 @@
+/* The instrument frame is quiet; the repository supplies the spatial detail. */
+:root {
+  --bg: #111213;
+  --panel: #191a1a;
+  --line: #333432;
+  --muted: #aaa69e;
+  --gold: #d8bc86;
+  background: var(--bg);
+  color: #ece9e2;
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+}
+::selection {
+  background: #d8bc86;
+  color: #181918;
+}
+* {
+  scrollbar-color: #64615a #191a1a;
+  scrollbar-width: thin;
+}
+input,
+textarea {
+  caret-color: var(--gold);
+}
+a {
+  text-underline-offset: 4px;
+}
+button {
+  transition:
+    background-color 140ms ease,
+    color 140ms ease,
+    transform 120ms var(--ease-out);
+}
+button:active:not(:disabled) {
+  transform: scale(0.97);
+}
+button:focus-visible {
+  transition: none;
+}
+button:hover:not(:disabled) {
+  filter: none;
+}
+@media (hover: hover) and (pointer: fine) {
+  button:hover:not(:disabled) {
+    background-color: #ffffff0a;
+  }
+  .primary:hover:not(:disabled) {
+    background-color: #e3c996;
+  }
+}
+.sidebar {
+  background: #151616;
+}
+.page-heading h1 {
+  font-size: 32px;
+  letter-spacing: -0.035em;
+}
+.page-heading p:last-child {
+  color: #aaa69e;
+  font-size: 14px;
+}
+.metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 28px;
+  background: transparent;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  padding: 16px 0;
+  margin-bottom: 22px;
+}
+.metrics > div {
+  padding: 0;
+  border: 0;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 4px;
+  min-width: 110px;
+}
+.metrics > div > span {
+  font-size: 11px;
+  letter-spacing: 0.035em;
+  color: #aaa69e;
+  text-transform: lowercase;
+}
+.metrics strong {
+  font-family: "DM Sans", sans-serif;
+  font-size: 18px;
+  font-weight: 500;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.25;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.metrics small {
+  display: none;
+}
+.metrics .commit {
+  font-family: monospace;
+  font-size: 16px;
+}
+.map-toolbar {
+  padding: 12px 16px;
+  gap: 16px;
+}
+.map-panel {
+  border-color: #383936;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.segmented {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  gap: 4px;
+}
+.segmented button {
+  min-height: 36px;
+  padding: 6px 12px;
+  border-radius: 5px;
+  font-size: 13px;
+}
+.segmented button.selected {
+  color: #e7d3ae;
+  background: #d8bc8614;
+  box-shadow: inset 0 0 0 1px #d8bc8630;
+}
+.search input {
+  font-size: 13px;
+}
+.map-legend {
+  background: #191a1a;
+  padding: 12px 16px;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 10px;
+  color: #aaa69e;
+}
+.detail-panel {
+  border-radius: 8px;
+  background: #191a1a;
+}
+.detail-top > span {
+  font-size: 13px;
+  color: #aaa69e;
+}
+.orbital-view {
+  position: relative;
+  background: #111213;
+  min-height: 570px;
+  height: clamp(570px, 65vh, 850px);
+  isolation: isolate;
+}
+.orbital-canvas {
+  position: absolute;
+  inset: 0;
+  outline-offset: -3px;
+}
+.orbital-canvas:focus-visible {
+  outline: 2px solid var(--gold);
+}
+.orbital-canvas canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+.orbital-caption {
+  position: absolute;
+  z-index: 2;
+  top: 22px;
+  left: 24px;
+  pointer-events: none;
+  display: grid;
+  gap: 5px;
+}
+.orbital-caption > span {
+  font-size: 14px;
+  color: #e1dace;
+}
+.orbital-caption small {
+  color: #aaa69e;
+  font-size: 11px;
+}
+.orbital-back {
+  position: absolute;
+  z-index: 3;
+  right: 20px;
+  top: 20px;
+  border: 1px solid #4b4840;
+  border-radius: 5px;
+  padding: 8px 12px;
+  background: #20211f;
+  font-size: 12px;
+}
+.orbital-controls {
+  position: absolute;
+  z-index: 2;
+  bottom: 18px;
+  left: 22px;
+  right: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  pointer-events: none;
+}
+.orbital-controls > span {
+  font-size: 11px;
+  color: #aaa69e;
+}
+.orbital-controls b {
+  margin: 0 5px;
+  font-weight: 400;
+}
+.orbital-controls > div {
+  display: flex;
+  gap: 4px;
+  pointer-events: auto;
+  background: #20211f;
+  border: 1px solid #45453f;
+  border-radius: 6px;
+  padding: 3px;
+}
+.orbital-controls button {
+  font-size: 11px;
+  padding: 8px 10px;
+  border-radius: 3px;
+  min-height: 34px;
+}
+.orbital-controls button[aria-pressed="true"] {
+  background: #d8bc8626;
+  color: #eed5a5;
+}
+.orbital-labels {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.orbital-labels span {
+  position: absolute;
+  left: 0;
+  top: 0;
+  max-width: 210px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  color: #bcb7ad;
+  text-shadow: 0 2px 5px #000;
+  background: #111213b8;
+  padding: 3px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+}
+.orbital-labels span.is-selected {
+  color: #f6d99e;
+  border-bottom: 1px solid #c5a770;
+}
+.orbital-tooltip {
+  position: absolute;
+  z-index: 5;
+  pointer-events: none;
+  display: grid;
+  gap: 6px;
+  background: #252624;
+  border: 1px solid #55534b;
+  border-radius: 5px;
+  padding: 12px;
+  box-shadow: 0 8px 24px #0006;
+  max-width: 220px;
+}
+.orbital-tooltip strong {
+  color: #eee6d7;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.orbital-tooltip small {
+  font-size: 11px;
+  color: #b7b1a4;
+}
+.orbital-loading,
+.orbital-fallback {
+  min-height: 570px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+  color: #c3bcaf;
+}
+.orbital-fallback {
+  position: absolute;
+  inset: 0;
+  background: #151616;
+  z-index: 4;
+}
+@media (max-width: 1100px) {
+  .orbital-controls > span {
+    display: none;
+  }
+  .orbital-controls {
+    justify-content: flex-end;
+  }
+  .metrics {
+    gap: 20px;
+  }
+  .map-toolbar {
+    flex-wrap: wrap;
+  }
+  .search {
+    max-width: none;
+  }
+}
+@media (max-width: 650px) {
+  .orbital-view {
+    min-height: 440px;
+    height: 60vh;
+  }
+  .orbital-caption {
+    left: 16px;
+    top: 18px;
+  }
+  .orbital-controls {
+    left: 12px;
+    right: 12px;
+  }
+  .orbital-controls button {
+    min-height: 44px;
+  }
+  .metrics {
+    gap: 20px;
+  }
+  .metrics > div {
+    min-width: 90px;
+  }
+  .map-toolbar {
+    padding: 10px;
+  }
+  .segmented button {
+    min-height: 44px;
+  }
+  .page-heading h1 {
+    font-size: 28px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  button {
+    transition: none;
+  }
+  .orbital-controls button[aria-pressed] {
+    transition: none;
+  }
+}
+.software-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  cursor: grab;
+  outline-offset: -3px;
+}
+.software-canvas:focus-visible {
+  outline: 2px solid var(--gold);
+}
+.software-canvas:active {
+  cursor: grabbing;
+}
+.map-workspace {
+  min-height: 0;
+}
+.orbital-view {
+  min-height: 440px;
+  height: clamp(440px, 52vh, 720px);
+}
+.page-heading {
+  padding-bottom: 20px;
+}
+.metrics {
+  padding: 12px 0;
+  margin-bottom: 20px;
+}
+.metrics strong {
+  margin-top: 0;
+}
+@media (max-width: 650px) {
+  .orbital-view {
+    height: 60vh;
+    min-height: 400px;
+  }
+}
+.sidebar nav {
+  margin-top: 20px;
+}
+.brand-mark {
+  display: inline-flex;
+  align-items: center;
+}
+.brand-mark svg {
+  width: 26px;
+  height: 26px;
+}
+.secondary.full,
+.settings-link {
+  gap: 8px;
+  display: flex;
+  align-items: center;
+}
+.component-emblem {
+  background: transparent;
+  border: 0;
+  width: 32px;
+  height: 32px;
+  margin: 24px 0 16px;
+}
+.component-emblem svg {
+  width: 32px;
+  height: 32px;
+}
+.search svg {
+  width: 16px;
+  height: 16px;
+}
+@media (max-width: 650px) {
+  .sidebar nav {
+    margin-top: 10px;
+    scrollbar-width: none;
+  }
+  .topbar {
+    height: 44px;
+  }
+  .page-heading {
+    padding: 18px 14px 14px;
+  }
+  .page-heading p:last-child {
+    display: none;
+  }
+  .page-heading h1 {
+    font-size: 24px;
+    margin-bottom: 0;
+  }
+  .metrics {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+    margin: 0 14px 14px;
+    padding: 10px 0;
+  }
+  .metrics > div {
+    min-width: 0;
+    border: 0 !important;
+  }
+  .metrics strong,
+  .metrics .commit {
+    font-size: 14px;
+  }
+  .metrics > div > span {
+    font-size: 8px;
+    letter-spacing: 0;
+  }
+  .orbital-view {
+    height: 370px;
+    min-height: 370px;
+  }
+  .map-toolbar {
+    gap: 6px;
+  }
+  .orbital-caption {
+    top: 14px;
+  }
+  .orbital-controls {
+    bottom: 12px;
+  }
+}
+.orbital-paging {
+  position: absolute;
+  z-index: 3;
+  top: 70px;
+  left: 20px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  background: #20211f;
+  border: 1px solid #45453f;
+  border-radius: 5px;
+}
+.orbital-paging button {
+  padding: 10px;
+}

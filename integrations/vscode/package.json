@@ -1,0 +1,4 @@
+{
+ "name":"caelogram-panel","displayName":"Caelogram","description":"Inspect repository context and changeset status in VS Code and compatible editors.","version":"0.1.0","publisher":"clearkey-solutions","engines":{"vscode":"^1.90.0"},"main":"./extension.cjs","activationEvents":["onView:caelogram.repositories"],
+ "contributes":{"commands":[{"command":"caelogram.login","title":"Caelogram: Connect session"},{"command":"caelogram.refresh","title":"Caelogram: Refresh repositories"},{"command":"caelogram.inspect","title":"Caelogram: Inspect repository"}],"views":{"explorer":[{"id":"caelogram.repositories","name":"Caelogram"}]},"configuration":{"title":"Caelogram","properties":{"caelogram.serviceUrl":{"type":"string","default":"http://localhost:4310","description":"HTTPS Caelogram service origin, or localhost for development."}}}},"scripts":{"check":"node --check extension.cjs"}
+}

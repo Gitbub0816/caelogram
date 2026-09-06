@@ -79,3 +79,9 @@ These print configuration for review, without overwriting agent settings. Portab
 - A truthful galaxy with pan/zoom/rotation, semantic symbol detail, a component table, task illumination, provenance, and uncertainty.
 
 See the verification report for actual test results and boundaries. Secret detection is heuristic, static relationships are incomplete, and production launch requires the documented security and operations gates.
+
+## Cloudflare and orbital map
+
+The console now offers **Orbit**, **Heatmap**, and **Components** views over the same real index. Orbit supports textured planets/stars, perspective rotation, pan, zoom, selection, optional spin, and a software-rendered fallback for devices without WebGL. Larger maps show counted regions that open into file bodies. No decorative repository entities are generated.
+
+Workers, D1, and private encrypted R2 deployment is configured in `wrangler.jsonc`. Follow [Cloudflare deployment](docs/cloudflare.md) to provision account resources, apply migrations, and configure identity and GitHub App secrets. `npm run cloud:check` bundles without deploying.
