@@ -32,5 +32,8 @@
       "simple": { "limit": 120, "period": 60 },
     },
   ],
-  "vars": { "PUBLIC_ORIGIN": "", "INSTALLATIONS": "{}" },
+  "vars": {
+    "PUBLIC_ORIGIN": "https://caelogram.com",
+    "INSTALLATIONS": "{}",
+  },
 }

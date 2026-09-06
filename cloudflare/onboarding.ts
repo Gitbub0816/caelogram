@@ -208,12 +208,15 @@ export async function availableRepositories(
   return result;
 }
 export async function startGitHub(p: Principal, env: Env) {
+  const missing = [
+    !env.GITHUB_CLIENT_ID && "GITHUB_CLIENT_ID",
+    !env.GITHUB_CLIENT_SECRET && "GITHUB_CLIENT_SECRET",
+    !env.GITHUB_APP_SLUG && "GITHUB_APP_SLUG",
+    !env.PUBLIC_ORIGIN && "PUBLIC_ORIGIN",
+  ].filter(Boolean);
   assert(
-    env.GITHUB_CLIENT_ID &&
-      env.GITHUB_CLIENT_SECRET &&
-      env.GITHUB_APP_SLUG &&
-      env.PUBLIC_ORIGIN,
-    "GitHub App OAuth is not configured",
+    !missing.length,
+    `GitHub connection is incomplete: ${missing.join(", ")}`,
     503,
   );
   const state = crypto.randomUUID() + crypto.randomUUID();
