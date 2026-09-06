@@ -109,9 +109,10 @@ export class GitHub implements Provider {
       "MVP supports at most 5,000 eligible files",
       413,
     );
+    const eligibleBytes = entries.reduce((s: number, e: any) => s + e.size, 0);
     assert(
-      entries.reduce((s: number, e: any) => s + e.size, 0) <= this.sourceBudget,
-      `Repository exceeds the ${this.sourceBudget / 1_000_000} MB source budget for this runtime. No partial index was published; use caelogram map locally.`,
+      eligibleBytes <= this.sourceBudget,
+      `Repository has ${(eligibleBytes / 1_000_000).toFixed(1)} MB of eligible source; hosted indexing currently supports ${this.sourceBudget / 1_000_000} MB. No partial index was published; use caelogram map locally.`,
       413,
     );
     const files: SourceFile[] = [];
