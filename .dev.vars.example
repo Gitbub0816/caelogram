@@ -1,8 +1,10 @@
 # Copy to .dev.vars for local Wrangler only. Never commit live values.
 DATA_KEY=replace-with-64-hex-characters
-JWKS_URL=https://identity.example/.well-known/jwks.json
-ISSUER=https://identity.example/
-AUDIENCE=https://caelogram.example
+CLERK_PUBLISHABLE_KEY=replace-with-clerk-publishable-key
+CLERK_ISSUER=https://your-instance.clerk.accounts.dev
+GITHUB_CLIENT_ID=replace-with-github-app-client-id
+GITHUB_CLIENT_SECRET=replace-with-github-app-client-secret
+GITHUB_APP_SLUG=replace-with-github-app-slug
 GITHUB_APP_ID=replace-with-app-id
 GITHUB_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\nreplace\n-----END RSA PRIVATE KEY-----"
 GITHUB_WEBHOOK_SECRET=replace-with-random-secret

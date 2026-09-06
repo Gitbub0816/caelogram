@@ -47,6 +47,20 @@ test("bundled Cloudflare Worker runs demo, context, origin checks and fail-close
     }),
   );
   try {
+    const configuration = await mf.dispatchFetch(
+      "https://caelogram.test/api/config",
+    );
+    assert.equal(configuration.status, 200);
+    assert.deepEqual(await configuration.json(), {
+      clerkPublishableKey: "",
+      githubConfigured: false,
+    });
+    const callback = await mf.dispatchFetch(
+      "https://caelogram.test/auth/github/callback?state=forged&code=fake",
+    );
+    assert.equal(callback.status, 400);
+    assert.match(callback.headers.get("Content-Type") || "", /text\/html/);
+    assert.match(await callback.text(), /Return to your workspace/);
     const demo = await mf.dispatchFetch("https://caelogram.test/api/demo");
     assert.equal(demo.status, 200);
     assert.equal(((await demo.json()) as any).files, 24);

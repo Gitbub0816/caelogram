@@ -10,7 +10,23 @@ import { context } from "../src/graph.js";
 import { assert, Fault, constantEqual } from "../src/security.js";
 import type { Principal, Task, Changeset, Repository } from "../src/types.js";
 import { CloudStore } from "./store.js";
+import {
+  clerkIdentity,
+  availableRepositories,
+  startGitHub,
+  finishGitHub,
+} from "./onboarding.js";
+import {
+  agentIdentity,
+  issueAgentToken,
+  listAgentTokens,
+} from "./agent-tokens.js";
 export interface Env {
+  CLERK_ISSUER?: string;
+  CLERK_PUBLISHABLE_KEY?: string;
+  GITHUB_CLIENT_ID: string;
+  GITHUB_CLIENT_SECRET: string;
+  GITHUB_APP_SLUG: string;
   DB: D1Database;
   SOURCE: R2Bucket;
   ASSETS: Fetcher;
@@ -37,6 +53,11 @@ function service(env: Env) {
   );
 }
 async function principal(req: Request, env: Env): Promise<Principal> {
+  const bearer = req.headers
+    .get("authorization")
+    ?.match(/^Bearer (caeg_.+)$/)?.[1];
+  if (bearer && env.CLERK_ISSUER) return agentIdentity(bearer, env);
+  if (env.CLERK_ISSUER) return clerkIdentity(req, env);
   assert(
     env.JWKS_URL && env.ISSUER && env.AUDIENCE,
     "Authentication is not configured",
@@ -111,7 +132,11 @@ function reply(data: unknown, status = 200) {
 async function route(req: Request, env: Env): Promise<Response> {
   const url = new URL(req.url),
     path = url.pathname;
-  if (path.startsWith("/api/") || path === "/mcp") {
+  if (
+    path.startsWith("/api/") ||
+    path === "/mcp" ||
+    path === "/auth/github/callback"
+  ) {
     const limit = await env.REQUEST_LIMIT.limit({
       key: req.headers.get("CF-Connecting-IP") || "local",
     });
@@ -131,6 +156,31 @@ async function route(req: Request, env: Env): Promise<Response> {
     "Origin rejected",
     403,
   );
+  if (path === "/api/config" && req.method === "GET")
+    return reply({
+      clerkPublishableKey: env.CLERK_PUBLISHABLE_KEY || "",
+      githubConfigured: Boolean(
+        env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET && env.GITHUB_APP_SLUG,
+      ),
+    });
+  if (path === "/auth/github/callback" && req.method === "GET") {
+    try {
+      return await finishGitHub(req, env, service(env).store);
+    } catch {
+      return new Response(
+        '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>GitHub connection · Caelogram</title><body style="background:#191a1a;color:#ece9e2;font:18px system-ui;padding:10%;max-width:640px"><h1>GitHub connection did not finish</h1><p>The authorization may have expired, been declined, or already been used. No repository was modified. Return to Caelogram and try connecting again.</p><a style="color:#d8bc86" href="/?connect=github">Return to your workspace</a></body></html>',
+        {
+          status: 400,
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-store",
+            "Set-Cookie":
+              "caelogram_oauth=; HttpOnly; Secure; SameSite=Lax; Path=/auth/github; Max-Age=0",
+          },
+        },
+      );
+    }
+  }
   if (path === "/webhooks/github" && req.method === "POST") {
     assert(env.GITHUB_WEBHOOK_SECRET, "Webhook not configured", 503);
     const body = await textBody(req),
@@ -195,6 +245,90 @@ async function route(req: Request, env: Env): Promise<Response> {
   if (path.startsWith("/api/") || path === "/mcp") {
     const p = await principal(req, env),
       s = service(env);
+    if (env.CLERK_ISSUER) {
+      if (
+        path.startsWith("/api/github/") ||
+        path.startsWith("/api/agent-tokens") ||
+        path === "/api/audit" ||
+        req.method === "DELETE"
+      )
+        s.allowed(p, "admin");
+      if (path === "/api/agent-tokens" && req.method === "GET")
+        return reply(await listAgentTokens(env, p));
+      if (path.startsWith("/api/agent-tokens/") && req.method === "DELETE") {
+        const id = path.slice("/api/agent-tokens/".length);
+        await env.DB.prepare("DELETE FROM agent_tokens WHERE tenant=? AND id=?")
+          .bind(p.tenant, id)
+          .run();
+        await s.store.audit(p.tenant, p.subject, "agent.revoked", id);
+        return reply({ revoked: true });
+      }
+      if (path === "/api/audit" && req.method === "GET")
+        return reply(await s.store.events(p.tenant));
+      // Owners can delete their retained data even after GitHub access is revoked.
+      if (path.startsWith("/api/repositories/") && req.method === "DELETE") {
+        const id = decodeURIComponent(path.slice(18));
+        const repo = await s.store.get<Repository>(p.tenant, "repo", id);
+        return reply(
+          await s.store.exclusive(p.tenant, () =>
+            s.remove({ ...p, repositories: [repo.name] }, id),
+          ),
+        );
+      }
+      if (path === "/api/github/start" && req.method === "POST") {
+        const start = await startGitHub(p, env);
+        return Response.json(
+          { url: start.url },
+          { headers: { "Set-Cookie": start.cookie } },
+        );
+      }
+      if (path === "/api/github/disconnect" && req.method === "POST") {
+        await s.store.exclusive(p.tenant, async () => {
+          await s.store.remove(p.tenant, "github-link", "current");
+          await env.DB.prepare("DELETE FROM agent_tokens WHERE tenant=?")
+            .bind(p.tenant)
+            .run();
+          await s.store.audit(
+            p.tenant,
+            p.subject,
+            "github.disconnected",
+            "current",
+          );
+        });
+        return reply({ disconnected: true });
+      }
+      const available = await availableRepositories(s.store, p.tenant, env);
+      p.repositories = available
+        .map((r) => r.name)
+        .filter(
+          (name) => p.scopes.includes("admin") || p.repositories.includes(name),
+        );
+      s.installations = {
+        [p.tenant]: [...new Set(available.map((r) => r.installationId))],
+      };
+      if (path === "/api/github/repositories" && req.method === "GET")
+        return reply({
+          repositories: available,
+          installUrl: `https://github.com/apps/${encodeURIComponent(env.GITHUB_APP_SLUG)}/installations/new`,
+        });
+      if (path === "/api/agent-tokens" && req.method === "POST") {
+        s.allowed(p, "admin");
+        const input = await json(req);
+        return reply(
+          await s.store.exclusive(p.tenant, async () => {
+            assert(
+              (await listAgentTokens(env, p)).length < 20,
+              "Revoke an existing token before creating another",
+              429,
+            );
+            const issued = await issueAgentToken(env, p, input);
+            await s.store.audit(p.tenant, p.subject, "agent.issued", issued.id);
+            return issued;
+          }),
+          201,
+        );
+      }
+    }
     if (path === "/mcp") {
       assert(req.method === "POST", "Use stateless Streamable HTTP POST", 405);
       // Buffer only after enforcing the same body cap as REST.
@@ -248,6 +382,12 @@ async function route(req: Request, env: Env): Promise<Response> {
   return env.ASSETS.fetch(req);
 }
 export async function processCloudJobs(env: Env) {
+  await env.DB.prepare("DELETE FROM oauth_states WHERE expires<?")
+    .bind(Date.now())
+    .run();
+  await env.DB.prepare("DELETE FROM agent_tokens WHERE expires<?")
+    .bind(Date.now())
+    .run();
   const s = service(env);
   // One scheduler at a time, and durable per-tenant mutation locks below.
   await s.store.exclusive("$scheduler", async () => {
@@ -261,6 +401,46 @@ export async function processCloudJobs(env: Env) {
             "SELECT DISTINCT tenant FROM objects WHERE kind='repo'",
           ).all<{ tenant: string }>();
         for (const { tenant } of rows.results) {
+          if (tenant.startsWith("user:") && env.CLERK_ISSUER) {
+            const repos = (
+              await s.store.list<Repository>(tenant, "repo")
+            ).filter(
+              (r) =>
+                r.name === event.name &&
+                r.installationId === event.installationId &&
+                event.ref === `refs/heads/${r.branch}`,
+            );
+            if (!repos.length) continue;
+            const grants = await availableRepositories(s.store, tenant, env);
+            s.installations = {
+              [tenant]: [...new Set(grants.map((r) => r.installationId))],
+            };
+            for (const r of repos)
+              if (
+                grants.some(
+                  (g) =>
+                    g.name === r.name && g.installationId === r.installationId,
+                ) &&
+                r.name === event.name &&
+                r.installationId === event.installationId &&
+                event.ref === `refs/heads/${r.branch}`
+              ) {
+                await s.store.exclusive(tenant, () =>
+                  s.connect(
+                    {
+                      tenant,
+                      subject: "github-webhook",
+                      scopes: ["admin"],
+                      repositories: [r.name],
+                    },
+                    r.name,
+                    r.branch,
+                    r.installationId,
+                  ),
+                );
+              }
+            continue;
+          }
           const repos = await s.store.list<Repository>(tenant, "repo");
           for (const r of repos)
             if (
@@ -322,7 +502,7 @@ export default {
     headers.set("X-Frame-Options", "DENY");
     headers.set(
       "Content-Security-Policy",
-      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'",
+      `default-src 'self'; script-src 'self' ${env.CLERK_ISSUER ? new URL(env.CLERK_ISSUER).origin : ""} https://challenges.cloudflare.com https://*.protect.clerk.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://img.clerk.com; connect-src 'self' ${env.CLERK_ISSUER ? new URL(env.CLERK_ISSUER).origin : ""} https://*.protect.clerk.com:*; frame-src https://challenges.cloudflare.com https://*.protect.clerk.com; worker-src 'self' blob:; font-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'`,
     );
     if (
       new URL(req.url).pathname.startsWith("/api") ||

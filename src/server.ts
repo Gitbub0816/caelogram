@@ -56,6 +56,9 @@ export function createServer(service: Service, devToken?: string) {
       return res.status(403).json({ error: "Origin not allowed" });
     next();
   });
+  app.get("/api/config", (_req, res) =>
+    res.json({ clerkPublishableKey: "", local: true }),
+  );
   app.get("/health", (_req, res) =>
     res.json({ status: "ok", version: "0.1.0" }),
   );

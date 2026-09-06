@@ -1,0 +1,125 @@
+.auth-page {
+  min-height: 100vh;
+  padding: 36px clamp(20px, 6vw, 100px);
+  background: #111213;
+}
+.auth-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  font-family: "Space Grotesk", sans-serif;
+  font-size: 26px;
+  color: #ece9e2;
+}
+.auth-brand svg {
+  color: #d8bc86;
+  width: 30px;
+  height: 30px;
+}
+.auth-layout {
+  max-width: 1150px;
+  margin: 90px auto;
+  display: grid;
+  grid-template-columns: 1fr 1.2fr;
+  gap: 70px;
+  align-items: start;
+}
+.auth-layout h1 {
+  white-space: pre-line;
+  font-size: clamp(38px, 5vw, 64px);
+  line-height: 1.1;
+  letter-spacing: -0.035em;
+}
+.auth-layout p {
+  max-width: 40ch;
+  color: #bbb5ab;
+  line-height: 1.7;
+}
+.auth-note {
+  padding-top: 28px;
+  border-top: 1px solid #333432;
+  margin-top: 36px;
+  font-size: 14px;
+}
+.auth-form {
+  min-width: 0;
+}
+.auth-loading {
+  padding: 60px;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+}
+.connect-step {
+  border-top: 1px solid #333432;
+  padding: 28px 0;
+  margin-top: 28px;
+}
+.connect-step h2 {
+  font-size: 20px;
+}
+.connect-step p {
+  color: #bbb5ab;
+  line-height: 1.7;
+}
+.connect-step label {
+  margin-bottom: 20px;
+}
+.connect-step summary {
+  cursor: pointer;
+}
+.connect-step .button-row {
+  flex-wrap: wrap;
+}
+@media (max-width: 750px) {
+  .auth-layout {
+    grid-template-columns: 1fr;
+    gap: 30px;
+    margin: 40px auto;
+  }
+  .auth-layout h1 {
+    font-size: 38px;
+  }
+  .auth-note {
+    display: none;
+  }
+  .auth-page {
+    padding: 24px 16px;
+  }
+  .auth-loading {
+    padding: 24px;
+  }
+  .connect-step .button-row {
+    flex-direction: column;
+  }
+}
+.agent-access fieldset {
+  border: 1px solid #45443e;
+  margin: 16px 0;
+  padding: 12px;
+  max-height: 240px;
+  overflow: auto;
+}
+.agent-access label.check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 0;
+}
+.agent-access label.check input {
+  width: auto;
+  margin: 0;
+  accent-color: #d8bc86;
+}
+.token-issued {
+  border-left: 2px solid #d8bc86;
+  padding: 12px;
+  margin: 16px 0;
+}
+.agent-access code {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}

@@ -54,7 +54,7 @@ program
     const token = process.env.CAELOGRAM_TOKEN;
     assert(
       token,
-      "Set CAELOGRAM_TOKEN to an issued token (browser OIDC login is a launch gate)",
+      "Set CAELOGRAM_TOKEN to a token from the console’s Access & integrations → Agent access",
     );
     const u = new URL(url);
     assert(
