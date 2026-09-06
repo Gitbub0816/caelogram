@@ -12,6 +12,7 @@ import type { Principal, Task, Changeset, Repository } from "../src/types.js";
 import { CloudStore } from "./store.js";
 import {
   clerkIdentity,
+  clerkIssuer,
   availableRepositories,
   startGitHub,
   finishGitHub,
@@ -52,12 +53,23 @@ function service(env: Env) {
     JSON.parse(env.INSTALLATIONS || "{}"),
   );
 }
+function clerkOriginForCsp(env: Env) {
+  try {
+    return env.CLERK_ISSUER || env.CLERK_PUBLISHABLE_KEY
+      ? clerkIssuer(env)
+      : "";
+  } catch {
+    return "";
+  }
+}
 async function principal(req: Request, env: Env): Promise<Principal> {
   const bearer = req.headers
     .get("authorization")
     ?.match(/^Bearer (caeg_.+)$/)?.[1];
-  if (bearer && env.CLERK_ISSUER) return agentIdentity(bearer, env);
-  if (env.CLERK_ISSUER) return clerkIdentity(req, env);
+  if (bearer && (env.CLERK_ISSUER || env.CLERK_PUBLISHABLE_KEY))
+    return agentIdentity(bearer, env);
+  if (env.CLERK_ISSUER || env.CLERK_PUBLISHABLE_KEY)
+    return clerkIdentity(req, env);
   assert(
     env.JWKS_URL && env.ISSUER && env.AUDIENCE,
     "Authentication is not configured",
@@ -502,7 +514,7 @@ export default {
     headers.set("X-Frame-Options", "DENY");
     headers.set(
       "Content-Security-Policy",
-      `default-src 'self'; script-src 'self' ${env.CLERK_ISSUER ? new URL(env.CLERK_ISSUER).origin : ""} https://challenges.cloudflare.com https://*.protect.clerk.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://img.clerk.com; connect-src 'self' ${env.CLERK_ISSUER ? new URL(env.CLERK_ISSUER).origin : ""} https://*.protect.clerk.com:*; frame-src https://challenges.cloudflare.com https://*.protect.clerk.com; worker-src 'self' blob:; font-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'`,
+      `default-src 'self'; script-src 'self' ${clerkOriginForCsp(env)} https://challenges.cloudflare.com https://*.protect.clerk.com https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://img.clerk.com; connect-src 'self' ${clerkOriginForCsp(env)} https://*.protect.clerk.com:* https://cloudflareinsights.com; frame-src https://challenges.cloudflare.com https://*.protect.clerk.com; worker-src 'self' blob:; font-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'`,
     );
     if (
       new URL(req.url).pathname.startsWith("/api") ||

@@ -39,20 +39,35 @@ export type AvailableRepo = {
   installationId: number;
 };
 const keys = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
+
+/** Clerk's Frontend API URL is also the JWT issuer. */
+export function clerkIssuer(env: Env) {
+  if (env.CLERK_ISSUER) return new URL(env.CLERK_ISSUER).origin;
+  const encoded = env.CLERK_PUBLISHABLE_KEY?.split("_")[2];
+  assert(encoded, "Clerk authentication is not configured", 503);
+  try {
+    const domain = atob(encoded.replace(/-/g, "+").replace(/_/g, "/")).replace(
+      /\$$/,
+      "",
+    );
+    const issuer = new URL(`https://${domain}`).origin;
+    assert(issuer.startsWith("https://"), "HTTPS issuer required");
+    return issuer;
+  } catch (e) {
+    if (e instanceof Fault) throw e;
+    throw new Fault(503, "Clerk authentication is not configured");
+  }
+}
+
 export async function clerkIdentity(
   req: Request,
   env: Env,
 ): Promise<Principal> {
   const token = req.headers.get("authorization")?.match(/^Bearer (.+)$/)?.[1];
   assert(token, "Sign in to continue", 401);
-  assert(
-    env.CLERK_ISSUER && env.PUBLIC_ORIGIN,
-    "Clerk authentication is not configured",
-    503,
-  );
+  assert(env.PUBLIC_ORIGIN, "Clerk authentication is not configured", 503);
   try {
-    const issuer = new URL(env.CLERK_ISSUER).origin;
-    assert(issuer.startsWith("https://"), "HTTPS issuer required");
+    const issuer = clerkIssuer(env);
     let jwks = keys.get(issuer);
     if (!jwks) {
       jwks = createRemoteJWKSet(new URL("/.well-known/jwks.json", issuer));
