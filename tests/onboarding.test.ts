@@ -9,6 +9,7 @@ import {
   finishGitHub,
   availableRepositories,
   clerkIdentity,
+  clerkIssuer,
 } from "../cloudflare/onboarding.js";
 import {
   issueAgentToken,
@@ -67,6 +68,15 @@ test("Clerk identity rejects wrong origin/expired sessions and ignores caller-su
   await assert.rejects(
     async () => clerkIdentity(request(await session({}, true)), env),
     /Invalid or expired/,
+  );
+});
+
+test("Clerk issuer falls back to the Frontend API encoded in its publishable key", () => {
+  const domain = "clerk.caelogram.com";
+  const key = `pk_live_${Buffer.from(`${domain}$`).toString("base64url")}`;
+  assert.equal(
+    clerkIssuer({ CLERK_PUBLISHABLE_KEY: key } as Env),
+    `https://${domain}`,
   );
 });
 
