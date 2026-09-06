@@ -10,6 +10,7 @@ import { context } from "../src/graph.js";
 import { assert, Fault, constantEqual } from "../src/security.js";
 import type { Principal, Task, Changeset, Repository } from "../src/types.js";
 import { CloudStore } from "./store.js";
+import { errorDetails } from "./errors.js";
 import {
   clerkIdentity,
   clerkIssuer,
@@ -492,23 +493,34 @@ export async function processCloudJobs(env: Env) {
 }
 export default {
   async fetch(req: Request, env: Env) {
+    const requestId = crypto.randomUUID();
     let response: Response;
     try {
       response = await route(req, env);
     } catch (e) {
+      console.error(JSON.stringify({
+        event: "request.failed",
+        requestId,
+        method: req.method,
+        path: new URL(req.url).pathname,
+        status: e instanceof Fault ? e.status : e instanceof z.ZodError ? 400 : 500,
+        errors: e instanceof z.ZodError ? [{ name: "ZodError", message: "Invalid request fields" }] : errorDetails(e, env),
+      }));
       response = reply(
         {
+          requestId,
           error:
             e instanceof Fault
               ? e.message
               : e instanceof z.ZodError
                 ? "Invalid request fields"
-                : "Request failed",
+                : `Request failed. Reference: ${requestId}`,
         },
         e instanceof Fault ? e.status : e instanceof z.ZodError ? 400 : 500,
       );
     }
     const headers = new Headers(response.headers);
+    headers.set("X-Request-ID", requestId);
     headers.set("X-Content-Type-Options", "nosniff");
     headers.set("Referrer-Policy", "no-referrer");
     headers.set("X-Frame-Options", "DENY");
