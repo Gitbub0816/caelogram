@@ -22,7 +22,7 @@ export interface Provider {
   ): Promise<{ url: string; number: number; branch: string }>;
 }
 export class GitHub implements Provider {
-  constructor(private credentials?: { appId: string; privateKey: string }) {}
+  constructor(private credentials?: { appId: string; privateKey: string }, private sourceBudget = 25_000_000) {}
   private auth?: ReturnType<typeof createAppAuth>;
   async api(
     name: string,
@@ -110,16 +110,16 @@ export class GitHub implements Provider {
       413,
     );
     assert(
-      entries.reduce((s: number, e: any) => s + e.size, 0) <= 25_000_000,
-      "MVP source budget is 25 MB",
+      entries.reduce((s: number, e: any) => s + e.size, 0) <= this.sourceBudget,
+      `Repository exceeds the ${this.sourceBudget / 1_000_000} MB source budget for this runtime. No partial index was published; use caelogram map locally.`,
       413,
     );
     const files: SourceFile[] = [];
     // Bounded concurrency to respect secondary GitHub rate limits.
-    for (let i = 0; i < entries.length; i += 5) {
+    for (let i = 0; i < entries.length; i += 2) {
       files.push(
         ...(await Promise.all(
-          entries.slice(i, i + 5).map(async (e: any) => {
+          entries.slice(i, i + 2).map(async (e: any) => {
             const cached = previous.find(
               (f) => f.path === e.path && f.sha === e.sha,
             );
@@ -139,6 +139,7 @@ export class GitHub implements Provider {
         )),
       );
     }
+    assert(files.reduce((sum, file) => sum + Buffer.byteLength(file.content), 0) <= this.sourceBudget, "Downloaded source exceeds runtime budget", 413);
     return { revision, files };
   }
   async publish(

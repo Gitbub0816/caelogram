@@ -50,8 +50,9 @@ function service(env: Env) {
     new GitHub({
       appId: env.GITHUB_APP_ID,
       privateKey: env.GITHUB_PRIVATE_KEY,
-    }),
+    }, 2_000_000),
     JSON.parse(env.INSTALLATIONS || "{}"),
+    { maxNodes: 10000, maxEdges: 20000 },
   );
 }
 function clerkOriginForCsp(env: Env) {

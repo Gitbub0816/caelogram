@@ -24,6 +24,7 @@ export class Service<S extends Storage = Store> {
     public store: S,
     public provider: Provider,
     public installations?: Record<string, number[]>,
+    public indexLimits?: { maxNodes: number; maxEdges: number },
   ) {}
   allowed(p: Principal, scope: string, repo?: string) {
     assert(
@@ -81,7 +82,7 @@ export class Service<S extends Storage = Store> {
       installationId,
       existing?.graph.files,
     );
-    const graph = index(snap.files, snap.revision, existing?.graph);
+    const graph = index(snap.files, snap.revision, existing?.graph, this.indexLimits);
     const repo: Repository = {
       id: existing?.id ?? randomUUID(),
       name,
