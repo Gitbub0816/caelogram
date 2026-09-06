@@ -1,6 +1,6 @@
 import ts from "typescript";
 import path from "node:path";
-import { digest, redact, safePath, sensitivePath } from "./security.js";
+import { digest, redact, safePath, sensitivePath, Fault } from "./security.js";
 import type {
   Component,
   Graph,
@@ -23,6 +23,7 @@ export function index(
   files: SourceFile[],
   revision: string,
   previous?: Graph,
+  limits?: { maxNodes: number; maxEdges: number },
 ): Graph {
   const nodes: Component[] = [],
     edges: Relation[] = [],
@@ -41,6 +42,9 @@ export function index(
     confidence = 1,
   ) => edges.push({ from, to, kind, evidence, confidence, revision });
   for (const file of selected) {
+    const source = code.test(file.path)
+      ? ts.createSourceFile(file.path, file.content, ts.ScriptTarget.Latest, false)
+      : undefined;
     const old = previous?.files.find(
       (f) => f.path === file.path && f.sha === file.sha,
     );
@@ -60,13 +64,7 @@ export function index(
         exported: false,
       };
       nodes.push(node);
-      if (code.test(file.path)) {
-        const source = ts.createSourceFile(
-          file.path,
-          file.content,
-          ts.ScriptTarget.Latest,
-          true,
-        );
+      if (source) {
         const visit = (n: ts.Node) => {
           let kind: Component["kind"] | undefined;
           if (ts.isFunctionDeclaration(n) || ts.isMethodDeclaration(n))
@@ -78,10 +76,10 @@ export function index(
           const name = (n as ts.NamedDeclaration).name;
           if (kind && name && ts.isIdentifier(name)) {
             const start =
-              source.getLineAndCharacterOfPosition(n.getStart()).line + 1;
+              source.getLineAndCharacterOfPosition(n.getStart(source)).line + 1;
             nodes.push({
               ...node,
-              id: `${file.path}#${name.text}:${start}:${n.getStart()}`,
+              id: `${file.path}#${name.text}:${start}:${n.getStart(source)}`,
               name: name.text,
               kind,
               start,
@@ -95,6 +93,8 @@ export function index(
                 ?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
           }
           ts.forEachChild(n, visit);
+          if (limits && nodes.length > limits.maxNodes)
+            throw new Fault(413, "Hosted symbol budget exceeded; no partial index was published. Use caelogram map locally.");
         };
         visit(source);
       }
@@ -103,14 +103,8 @@ export function index(
       (n) => n.path === file.path && n.kind !== "file",
     ))
       edge(file.path, n.id, "contains", `AST declaration at line ${n.start}`);
-    if (!code.test(file.path)) continue;
+    if (!source) continue;
     // Always resolve imports against the new file set: a newly added module can resolve an old import.
-    const source = ts.createSourceFile(
-      file.path,
-      file.content,
-      ts.ScriptTarget.Latest,
-      true,
-    );
     const resolve = (specifier: string) => {
       if (!specifier.startsWith(".")) {
         if (specifier.startsWith("@") || specifier.startsWith("~"))
@@ -165,6 +159,8 @@ export function index(
       ts.forEachChild(n, visit);
     };
     visit(source);
+    if (limits && edges.length > limits.maxEdges)
+      throw new Fault(413, "Hosted relationship budget exceeded; no partial index was published. Use caelogram map locally.");
   }
   if (files.length !== selected.length)
     warnings.push(
