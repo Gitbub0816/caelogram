@@ -4,7 +4,14 @@ import type { Identity } from "./Auth";
 import Connect from "./Connect";
 import AgentAccess from "./AgentAccess";
 import { Galaxy, colors, type MapData } from "./Galaxy";
-const OrbitalGalaxy = lazy(() => import("./OrbitalGalaxy"));
+const RepoGalaxy = lazy(() => import("./RepoGalaxy"));
+import {
+  defaultFilters,
+  payloadFromMapData,
+  type Filters,
+  type Galaxy as GalaxyModel,
+  type GalaxyPayload,
+} from "./galaxy-model";
 type Item = {
   path: string;
   reason: string;
@@ -67,6 +74,10 @@ export default function App({
     [repositories, setRepositories] = useState<any[]>([]),
     [demo, setDemo] = useState(true),
     [mapMode, setMapMode] = useState<"orbit" | "heatmap" | "table">("orbit"),
+    [galaxyData, setGalaxyData] = useState<GalaxyPayload | null>(null),
+    [galaxy, setGalaxy] = useState<GalaxyModel | null>(null),
+    [filters, setFilters] = useState<Filters>(defaultFilters),
+    [inspectorOpen, setInspectorOpen] = useState(true),
     [history, setHistory] = useState<{ tasks: any[]; changes: Change[] }>({
       tasks: [],
       changes: [],
@@ -115,6 +126,30 @@ export default function App({
       setData(await request("/api/demo")),
     );
   }, []);
+  // The galaxy needs every file at once, which the paged map deliberately does
+  // not carry. Sample data is already complete, so only real repositories hit
+  // the whole-repository endpoint.
+  useEffect(() => {
+    if (!data) return;
+    if (demo) {
+      setGalaxyData(payloadFromMapData(data));
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const g = await request("/api/galaxy/" + data.id);
+        if (!cancelled) setGalaxyData(g);
+      } catch {
+        // Older deployments have no galaxy route; the paged map still renders.
+        if (!cancelled) setGalaxyData(payloadFromMapData(data));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [data?.id, data?.revision, demo]);
+  useEffect(() => setFilters(defaultFilters), [data?.id]);
   const loadRepo = async (id: string) => {
     const next = await tool("repository_map", { repoId: id });
     setData(next);
@@ -153,6 +188,9 @@ export default function App({
       setView("context");
     });
   const node = data?.nodes.find((n) => n.id === selected);
+  // A file can be selected in the galaxy while sitting outside the current map
+  // page, so the inspector falls back to what the galaxy itself knows.
+  const body = selected ? galaxy?.byPath.get(selected) : undefined;
   const incoming =
     data?.edges.filter((e) => e.to === selected && e.kind !== "contains") ?? [];
   const outgoing =
@@ -175,11 +213,7 @@ export default function App({
           onClick={() => setView("home")}
           aria-label="Caelogram home"
         >
-          <span className="brand-mark">
-            <Icon />
-          </span>
-          caelogram
-          <span className="beta">α</span>
+          <img className="brand-logo" src="/logo.png" alt="caelogram" />
         </button>
         <div className="workspace">
           <span className="workspace-icon">C</span>
@@ -208,9 +242,7 @@ export default function App({
         </nav>
         <div className="sidebar-bottom">
           <div className="index-status">
-            <span className="small-orbit">
-              <Icon />
-            </span>
+            <img className="small-orbit" src="/mark.png" alt="" />
             <div>
               {demo ? "Sample repository" : "Commit indexed"}
               <small>
@@ -234,7 +266,7 @@ export default function App({
           </a>
         </div>
       </aside>
-      <main>
+      <main className={view === "map" ? "map-mode" : ""}>
         <header className="topbar">
           <div className="breadcrumb">
             Workspace <span>/</span>
@@ -1010,7 +1042,7 @@ export default function App({
                         className={mapMode === "orbit" ? "selected" : ""}
                         onClick={() => setMapMode("orbit")}
                       >
-                        Orbit
+                        Galaxy
                       </button>
                       <button
                         className={mapMode === "heatmap" ? "selected" : ""}
@@ -1078,25 +1110,33 @@ export default function App({
                         </tbody>
                       </table>
                     </div>
-                  ) : mapMode === "orbit" ? (
+                  ) : mapMode === "orbit" && galaxyData ? (
                     <Suspense
                       fallback={
                         <div className="orbital-loading" role="status">
-                          Preparing orbital map…
+                          Charting the galaxy…
                         </div>
                       }
                     >
-                      <OrbitalGalaxy
-                        data={data}
+                      <RepoGalaxy
+                        data={galaxyData}
                         selected={selected}
-                        onSelect={(id) => {
-                          setSelected(id);
+                        onSelect={(path) => {
+                          setSelected(path);
                           setSource("");
+                          setInspectorOpen(true);
                         }}
                         relevant={task?.context.items.map((i) => i.path) ?? []}
                         search={search}
+                        filters={filters}
+                        onFilters={setFilters}
+                        onGalaxy={setGalaxy}
                       />
                     </Suspense>
+                  ) : mapMode === "orbit" ? (
+                    <div className="orbital-loading" role="status">
+                      Charting the galaxy…
+                    </div>
                   ) : (
                     <Galaxy
                       data={data}
@@ -1119,15 +1159,28 @@ export default function App({
                     <span>Dashed links = test imports</span>
                   </div>
                 </section>
-                <aside className="detail-panel">
+                <aside
+                  className={`detail-panel${inspectorOpen ? "" : " collapsed"}`}
+                >
                   <div className="detail-top">
                     <span>Component</span>
-                    <span>↗</span>
+                    <button
+                      className="detail-collapse"
+                      aria-expanded={inspectorOpen}
+                      aria-label={
+                        inspectorOpen
+                          ? "Collapse inspector"
+                          : "Expand inspector"
+                      }
+                      onClick={() => setInspectorOpen(!inspectorOpen)}
+                    >
+                      {inspectorOpen ? "→" : "←"}
+                    </button>
                   </div>
                   {node ? (
                     <>
                       <div className="component-emblem">
-                        <Icon />
+                        <img src="/mark.png" alt="" />
                       </div>
                       <h2>{node.name}</h2>
                       <p className="path">{node.path}</p>
@@ -1267,6 +1320,60 @@ export default function App({
                         <span>
                           Valid at {data.revision.slice(0, 8)}. Import
                           resolution does not establish runtime reachability.
+                        </span>
+                      </div>
+                    </>
+                  ) : body ? (
+                    <>
+                      <div className="component-emblem">
+                        <img src="/mark.png" alt="" />
+                      </div>
+                      <h2>{body.name}</h2>
+                      <p className="path">{body.path}</p>
+                      <span className="pill">{body.bodyClass}</span>
+                      <dl>
+                        <div>
+                          <dt>Subsystem</dt>
+                          <dd>{body.directory}</dd>
+                        </div>
+                        <div>
+                          <dt>Incoming links</dt>
+                          <dd>{body.incoming}</dd>
+                        </div>
+                        <div>
+                          <dt>Dependencies</dt>
+                          <dd>{body.outgoing}</dd>
+                        </div>
+                        <div>
+                          <dt>File type</dt>
+                          <dd>{body.category}</dd>
+                        </div>
+                      </dl>
+                      <div className="inspector-section">
+                        <h3>Why it looks this way</h3>
+                        <p>
+                          {body.incoming} files import this one, so the galaxy
+                          renders it as a {body.bodyClass} and places it{" "}
+                          {body.incoming >= (galaxy?.cuts.planet ?? 2)
+                            ? "near the core"
+                            : "out toward the rim"}
+                          .
+                        </p>
+                      </div>
+                      <button
+                        className="secondary full"
+                        onClick={() =>
+                          setFilters({ ...filters, focus: body.path })
+                        }
+                      >
+                        Focus on its neighbourhood
+                      </button>
+                      <div className="evidence-note">
+                        STATIC EVIDENCE
+                        <span>
+                          Valid at {data.revision.slice(0, 8)}. This file is
+                          outside the loaded map page, so declarations are not
+                          shown.
                         </span>
                       </div>
                     </>

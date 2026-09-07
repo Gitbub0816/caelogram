@@ -222,6 +222,13 @@ export function createServer(service: Service, devToken?: string) {
       next(e);
     }
   });
+  app.get("/api/galaxy/:repoId", async (req, res, next) => {
+    try {
+      res.json(await service.galaxy(res.locals.principal, req.params.repoId));
+    } catch (e) {
+      next(e);
+    }
+  });
   app.get("/api/history/:repoId", async (req, res, next) => {
     try {
       const p = res.locals.principal as Principal;

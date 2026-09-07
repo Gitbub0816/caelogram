@@ -13,6 +13,26 @@ import type {
 } from "./types.js";
 import { assert, digest, redact, safePath, sensitivePath } from "./security.js";
 import { index, context, impact, tokens, sourceFile } from "./graph.js";
+export type GalaxyNode = {
+  path: string;
+  name: string;
+  symbols: number;
+  bytes: number;
+  excluded: boolean;
+};
+export type GalaxyData = {
+  id: string;
+  name: string;
+  branch: string;
+  revision: string;
+  files: number;
+  symbols: number;
+  relationships: number;
+  nodes: GalaxyNode[];
+  edges: [number, number, number][];
+  kinds: string[];
+  truncated: boolean;
+};
 export const editSchema = z.object({
   path: z.string().min(1).max(400),
   content: z.string().max(256000).nullable(),
@@ -141,6 +161,46 @@ export class Service<S extends Storage = Store> {
       nodes: r.graph.nodes,
       edges: r.graph.edges,
       warnings: r.graph.warnings,
+    };
+  }
+  // Whole-repository view for the visual galaxy. Deliberately lightweight:
+  // one entry per file plus index-encoded edges, so the browser can hold every
+  // file of a mature repository at once. The paged map_page tool contract that
+  // agents depend on is untouched.
+  async galaxy(p: Principal, id: string): Promise<GalaxyData> {
+    const r = await this.repo(p, id);
+    const symbols = new Map<string, number>();
+    for (const n of r.graph.nodes)
+      if (n.kind !== "file")
+        symbols.set(n.path, (symbols.get(n.path) ?? 0) + 1);
+    const files = r.graph.nodes.filter((n) => n.kind === "file");
+    const bytes = new Map(
+      r.graph.files.map((f) => [f.path, f.content.length] as const),
+    );
+    const order = new Map(files.map((n, i) => [n.path, i]));
+    const kinds: string[] = [];
+    const edges: [number, number, number][] = [];
+    for (const e of r.graph.edges) {
+      if (e.kind === "contains") continue;
+      const from = order.get(e.from),
+        to = order.get(e.to);
+      if (from === undefined || to === undefined || from === to) continue;
+      let k = kinds.indexOf(e.kind);
+      if (k < 0) k = kinds.push(e.kind) - 1;
+      edges.push([from, to, k]);
+    }
+    return {
+      ...this.summary(r),
+      nodes: files.map((n) => ({
+        path: n.path,
+        name: n.name,
+        symbols: symbols.get(n.path) ?? 0,
+        bytes: bytes.get(n.path) ?? 0,
+        excluded: !!n.exclusionReason,
+      })),
+      edges,
+      kinds,
+      truncated: false,
     };
   }
   async begin(p: Principal, repoId: string, prompt: string, budget: number) {

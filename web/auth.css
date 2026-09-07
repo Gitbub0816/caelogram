@@ -11,10 +11,10 @@
   font-size: 26px;
   color: #ece9e2;
 }
-.auth-brand svg {
-  color: #d8bc86;
-  width: 30px;
-  height: 30px;
+.auth-brand img {
+  width: 210px;
+  height: auto;
+  display: block;
 }
 .auth-layout {
   max-width: 1150px;
@@ -124,7 +124,8 @@
   white-space: normal;
 }
 /* Native progress controls must follow the same warm palette on Safari and Firefox. */
-.connect-page progress, progress {
+.connect-page progress,
+progress {
   accent-color: #d8bc86;
   height: 8px;
   border: 0;
@@ -132,6 +133,12 @@
   overflow: hidden;
   background: #34332f;
 }
-progress::-webkit-progress-bar { background: #34332f; }
-progress::-webkit-progress-value { background: #d8bc86; }
-progress::-moz-progress-bar { background: #d8bc86; }
+progress::-webkit-progress-bar {
+  background: #34332f;
+}
+progress::-webkit-progress-value {
+  background: #d8bc86;
+}
+progress::-moz-progress-bar {
+  background: #d8bc86;
+}

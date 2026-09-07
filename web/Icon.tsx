@@ -39,8 +39,8 @@ export function Icon({ name = "map" }: { name?: string }) {
     >
       {name === "map" ? (
         <g transform="rotate(-35 12 12)" fill="currentColor" stroke="none">
-          {orbitalDots.map(([cx, cy]) => (
-            <circle key={cx} cx={cx} cy={cy} r="1.18" />
+          {orbitalDots.map(([cx, cy], i) => (
+            <circle key={i} cx={cx} cy={cy} r="1.18" />
           ))}
         </g>
       ) : (

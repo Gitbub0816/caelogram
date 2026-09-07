@@ -1,6 +1,7 @@
 node_modules/
 dist/
-public/
+# Vite build output at the repository root only; web/public holds real assets.
+/public/
 .data/
 .env
 .env.*

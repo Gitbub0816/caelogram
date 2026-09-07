@@ -1,0 +1,532 @@
+/* ── Full-bleed repository map ─────────────────────────────────────────────
+   The sidebar stays; everything else floats over the galaxy so nothing but the
+   repository itself occupies the page. */
+main.map-mode {
+  height: 100vh;
+  overflow: hidden;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+main.map-mode > * {
+  pointer-events: none;
+}
+main.map-mode > * > *,
+main.map-mode .map-workspace * {
+  pointer-events: auto;
+}
+main.map-mode .map-workspace {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  min-height: 0;
+  display: block;
+  overflow: visible;
+  z-index: 0;
+  pointer-events: none;
+}
+main.map-mode .map-panel {
+  position: absolute;
+  inset: 0;
+  background: #08090c;
+  display: block;
+  pointer-events: auto;
+}
+main.map-mode .map-panel > .galaxy-stage,
+main.map-mode .map-panel > .orbital-loading,
+main.map-mode .map-panel > .galaxy-fallback {
+  position: absolute;
+  inset: 0;
+}
+main.map-mode .component-table,
+main.map-mode .map-panel > svg {
+  position: absolute;
+  inset: 74px 0 0;
+  overflow: auto;
+  background: #0c0d10;
+}
+/* Chrome, floated on the canvas. */
+main.map-mode .topbar {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 56px;
+  border-bottom: 0;
+  padding: 0 24px;
+  z-index: 6;
+  background: linear-gradient(#08090cdd, #08090c00);
+  backdrop-filter: blur(3px);
+}
+main.map-mode .page-heading {
+  position: absolute;
+  top: 52px;
+  left: 24px;
+  right: 24px;
+  padding: 0;
+  z-index: 6;
+  align-items: flex-start;
+}
+main.map-mode .page-heading h1 {
+  font-size: 24px;
+  margin-bottom: 2px;
+  text-shadow: 0 2px 18px #000a;
+}
+main.map-mode .page-heading p:last-child {
+  font-size: 12px;
+  text-shadow: 0 2px 14px #000a;
+}
+main.map-mode .metrics {
+  position: absolute;
+  top: 110px;
+  left: 24px;
+  z-index: 6;
+  display: flex;
+  gap: 0;
+  margin: 0;
+  background: #12131799;
+  backdrop-filter: blur(9px);
+  border-color: #ffffff14;
+}
+main.map-mode .metrics > div {
+  padding: 8px 15px;
+  border-color: #ffffff14;
+}
+main.map-mode .metrics strong {
+  font-size: 16px;
+  margin-top: 3px;
+  gap: 7px;
+}
+main.map-mode .metrics .commit {
+  font-size: 14px;
+}
+main.map-mode .metrics small {
+  font-size: 10px;
+}
+main.map-mode .map-toolbar {
+  position: absolute;
+  top: 110px;
+  right: 24px;
+  left: auto;
+  width: auto;
+  border-bottom: 0;
+  padding: 0;
+  z-index: 7;
+  gap: 10px;
+}
+main.map-mode .map-toolbar .segmented,
+main.map-mode .map-toolbar .search {
+  background: #121317cc;
+  backdrop-filter: blur(9px);
+  border-radius: 7px;
+}
+main.map-mode .map-legend {
+  display: none;
+}
+main.map-mode .map-workspace > .notice {
+  position: absolute;
+  left: 24px;
+  bottom: 18px;
+  max-width: 460px;
+  z-index: 6;
+  background: #121317dd;
+  backdrop-filter: blur(9px);
+  font-size: 12px;
+  pointer-events: auto;
+}
+main.map-mode .detail-panel {
+  position: absolute;
+  top: 166px;
+  right: 24px;
+  bottom: 18px;
+  width: 320px;
+  max-height: none;
+  border: 1px solid #ffffff17;
+  border-radius: 10px;
+  background: #101115ee;
+  backdrop-filter: blur(14px);
+  z-index: 8;
+  overflow: auto;
+  transition: width 0.16s ease;
+}
+main.map-mode .detail-panel.collapsed {
+  width: 132px;
+  bottom: auto;
+  overflow: hidden;
+}
+.detail-panel.collapsed > *:not(.detail-top) {
+  display: none;
+}
+.detail-collapse {
+  color: #cfc7b6;
+  font-size: 14px;
+  padding: 2px 6px;
+  border-radius: 5px;
+}
+.detail-collapse:hover {
+  background: #ffffff12;
+}
+main.map-mode .loading,
+main.map-mode .notice.error {
+  position: absolute;
+  top: 56px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9;
+}
+/* Keep the filter panel clear of the heading and metric overlays. */
+main.map-mode .galaxy-filters {
+  top: 200px;
+  left: 24px;
+  max-height: calc(100% - 400px);
+}
+main.map-mode .component-table {
+  inset: 166px 0 0;
+}
+/* Keep the orbit controls clear of the floating inspector. */
+main.map-mode .galaxy-controls {
+  right: 364px;
+}
+@media (max-width: 1250px) {
+  main.map-mode .detail-panel,
+  main.map-mode .galaxy-filters {
+    width: 288px;
+  }
+}
+@media (max-width: 900px) {
+  main.map-mode {
+    height: auto;
+    overflow: visible;
+  }
+  main.map-mode .map-workspace {
+    position: relative;
+    height: 70vh;
+  }
+  main.map-mode .topbar,
+  main.map-mode .page-heading,
+  main.map-mode .metrics,
+  main.map-mode .map-toolbar,
+  main.map-mode .detail-panel {
+    position: static;
+    transform: none;
+    width: auto;
+    inset: auto;
+  }
+}
+
+/* ── Galaxy renderer ──────────────────────────────────────────────────── */
+.galaxy-stage {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: radial-gradient(120% 90% at 50% 45%, #101321 0%, #08090c 62%);
+}
+.galaxy-canvas {
+  position: absolute;
+  inset: 0;
+  outline: none;
+}
+.galaxy-canvas canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+}
+.galaxy-canvas:focus-visible {
+  box-shadow: inset 0 0 0 2px #e8c98d88;
+}
+.galaxy-labels {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.galaxy-labels span {
+  position: absolute;
+  display: none;
+  white-space: nowrap;
+  font-size: 10.5px;
+  letter-spacing: 0.2px;
+  color: #ded6c6;
+  text-shadow:
+    0 1px 5px #000,
+    0 0 14px #000;
+  padding: 1px 4px;
+}
+.galaxy-labels span.is-selected {
+  color: #ffe2ac;
+  font-weight: 600;
+  font-size: 12px;
+}
+.galaxy-tooltip {
+  position: absolute;
+  z-index: 5;
+  pointer-events: none;
+  background: #0e0f13f2;
+  border: 1px solid #ffffff1f;
+  border-radius: 8px;
+  padding: 9px 12px;
+  display: grid;
+  gap: 3px;
+  max-width: 260px;
+}
+.galaxy-tooltip strong {
+  font-size: 13px;
+  color: #f2ece0;
+}
+.galaxy-tooltip code {
+  font-size: 10.5px;
+  color: #a49d8f;
+  overflow-wrap: anywhere;
+}
+.galaxy-tooltip small {
+  font-size: 10.5px;
+  color: #e0c188;
+  text-transform: capitalize;
+}
+.galaxy-controls {
+  position: absolute;
+  right: 18px;
+  bottom: 18px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 11px;
+  color: #8f8a7e;
+}
+.galaxy-controls > div {
+  display: flex;
+  gap: 6px;
+}
+.galaxy-controls button {
+  font-size: 11px;
+  padding: 6px 11px;
+  border: 1px solid #ffffff1c;
+  border-radius: 6px;
+  background: #14151acc;
+  backdrop-filter: blur(8px);
+  color: #ddd5c5;
+}
+.galaxy-controls button:hover,
+.galaxy-controls button[aria-pressed="true"] {
+  border-color: #e8c98d66;
+  color: #f4e6c9;
+}
+.galaxy-legend {
+  position: absolute;
+  left: 18px;
+  bottom: 18px;
+  z-index: 4;
+  width: 258px;
+  padding: 12px 14px;
+  border: 1px solid #ffffff14;
+  border-radius: 9px;
+  background: #0e0f13cc;
+  backdrop-filter: blur(10px);
+  color: #a8a294;
+  font-size: 10.5px;
+}
+.galaxy-legend h4 {
+  margin: 0 0 8px;
+  font-size: 10px;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: #cbbfa4;
+}
+.galaxy-legend ul {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+.galaxy-legend li {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #bdb6a7;
+}
+.galaxy-legend p {
+  margin: 0;
+  line-height: 1.5;
+  color: #857f74;
+}
+.galaxy-legend .dot {
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.galaxy-legend .dot.star {
+  width: 12px;
+  height: 12px;
+  background: radial-gradient(#fff6dd, #f0c274);
+  box-shadow: 0 0 9px #f0c27499;
+}
+.galaxy-legend .dot.planet {
+  width: 9px;
+  height: 9px;
+  background: linear-gradient(140deg, #e8c98d, #8a6f45);
+}
+.galaxy-legend .dot.moon {
+  width: 6px;
+  height: 6px;
+  background: #a8bdd4;
+}
+.galaxy-legend .dot.debris {
+  width: 4px;
+  height: 4px;
+  background: #6d6a63;
+}
+.galaxy-fallback {
+  display: grid;
+  place-content: center;
+  gap: 8px;
+  text-align: center;
+  padding: 40px;
+  color: #a49d8f;
+  background: #0c0d10;
+}
+.galaxy-fallback h3 {
+  color: #e6dfd0;
+  font-size: 15px;
+}
+
+/* ── Filter panel ─────────────────────────────────────────────────────── */
+.galaxy-filters {
+  position: absolute;
+  left: 18px;
+  top: 18px;
+  z-index: 5;
+  width: 258px;
+  border: 1px solid #ffffff17;
+  border-radius: 10px;
+  background: #0e0f13e6;
+  backdrop-filter: blur(14px);
+  overflow: hidden;
+  max-height: calc(100% - 200px);
+  display: flex;
+  flex-direction: column;
+}
+.filters-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  color: #e2dbcb;
+  font-size: 12px;
+  font-weight: 600;
+  border-bottom: 1px solid #ffffff10;
+}
+.filters-head small {
+  margin-left: auto;
+  font-size: 10px;
+  color: #8b8578;
+}
+.filters-head i {
+  font-style: normal;
+  color: #9a9488;
+  font-size: 14px;
+  width: 12px;
+}
+.filters-body {
+  padding: 4px 12px 12px;
+  overflow: auto;
+  display: grid;
+  gap: 12px;
+}
+.filters-body section {
+  display: grid;
+  gap: 6px;
+}
+.filters-body h5 {
+  margin: 8px 0 0;
+  font-size: 9.5px;
+  letter-spacing: 1.3px;
+  text-transform: uppercase;
+  color: #8f887a;
+}
+.filters-body .slider {
+  display: grid;
+  gap: 5px;
+  font-size: 11px;
+  color: #a8a294;
+}
+.filters-body .slider b {
+  color: #e9d5ab;
+}
+.filters-body input[type="range"] {
+  width: 100%;
+  accent-color: #e8c98d;
+}
+.filters-body .chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  border: 1px solid #ffffff17;
+  border-radius: 999px;
+  background: #ffffff08;
+  color: #b3ad9f;
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+.chip i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.chip em {
+  font-style: normal;
+  color: #7d786d;
+  font-size: 9.5px;
+}
+.chip:hover {
+  border-color: #ffffff2e;
+  color: #ded7c8;
+}
+.chip.on {
+  background: #e8c98d22;
+  border-color: #e8c98d77;
+  color: #f3e6c9;
+}
+.chip.on em {
+  color: #c7b389;
+}
+.focus-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.focus-row code {
+  font-size: 10px;
+  color: #cbbfa4;
+  overflow-wrap: anywhere;
+  flex: 1;
+}
+.focus-row button {
+  font-size: 10px;
+  color: #9a9488;
+  border: 1px solid #ffffff17;
+  border-radius: 5px;
+  padding: 3px 7px;
+}
+.segmented.small button {
+  font-size: 10.5px;
+  padding: 5px 8px;
+}
+.filters-reset {
+  margin-top: 4px;
+  font-size: 10.5px;
+  color: #cbb98f;
+  border: 1px dashed #e8c98d44;
+  border-radius: 6px;
+  padding: 6px 8px;
+  text-align: left;
+}

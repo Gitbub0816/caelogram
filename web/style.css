@@ -149,21 +149,11 @@ pre {
   gap: 7px;
   color: #f6f5f2;
 }
-.brand-mark {
-  display: inline-flex;
-  line-height: 0;
-  color: #d6c29a;
-}
-.brand-mark svg {
-  width: 31px;
-  height: 31px;
-}
-.beta {
-  color: #a6a091;
-  align-self: flex-start;
-  font-size: 14px;
-  margin-top: 2px;
-  letter-spacing: 0;
+.brand-logo {
+  width: 100%;
+  max-width: 176px;
+  height: auto;
+  display: block;
 }
 .workspace {
   display: flex;
@@ -252,8 +242,9 @@ pre {
   margin-top: 5px;
 }
 .small-orbit {
-  font-size: 24px;
-  color: #b3afa5;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
 }
 .settings-link {
   font-size: 13px;
@@ -620,8 +611,12 @@ main {
   border: 1px solid #7b736044;
   border-radius: 10px;
   background: radial-gradient(#4b4434, #21201f);
-  font-size: 33px;
   color: #d7d2c5;
+  overflow: hidden;
+}
+.component-emblem img {
+  width: 34px;
+  height: 34px;
 }
 .detail-panel h2 {
   font-size: 20px;
@@ -1204,8 +1199,8 @@ td button {
     width: 190px;
     padding: 27px 12px;
   }
-  .brand {
-    font-size: 22px;
+  .brand-logo {
+    max-width: 150px;
   }
   main {
     margin-left: 190px;
@@ -1385,11 +1380,10 @@ td button {
     display: block;
   }
   .brand {
-    font-size: 23px;
     display: inline-flex;
   }
-  .brand-mark {
-    font-size: 35px;
+  .brand-logo {
+    max-width: 168px;
   }
   .workspace,
   .nav-label,
