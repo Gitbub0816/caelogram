@@ -1186,6 +1186,62 @@ async function issue(
   });
 }
 
+/**
+ * The consents this person has given, for the console. A grant is only ever
+ * listed or revoked for the subject that granted it — never by client id alone,
+ * so one person can never see or cancel another's authorization.
+ */
+export async function listGrants(p: Principal, env: Env) {
+  const rows = await env.DB.prepare(
+    `SELECT g.id, g.client_id, g.scope, g.created,
+            c.name AS client_name, c.uri AS client_uri, c.software,
+            (SELECT count(*) FROM oauth_tokens t
+              WHERE t.grant_id = g.id AND t.kind = 'access' AND t.expires > ?) AS active,
+            (SELECT max(created) FROM oauth_tokens t WHERE t.grant_id = g.id) AS last_issued
+       FROM oauth_grants g
+       LEFT JOIN oauth_clients c ON c.client_id = g.client_id
+      WHERE g.subject = ? AND g.revoked IS NULL
+      ORDER BY g.created DESC
+      LIMIT 100`,
+  )
+    .bind(Date.now(), p.subject)
+    .all<{
+      id: string;
+      client_id: string;
+      scope: string;
+      created: number;
+      client_name: string | null;
+      client_uri: string | null;
+      software: string | null;
+      active: number;
+      last_issued: number | null;
+    }>();
+  return {
+    grants: rows.results.map((r) => ({
+      id: r.id,
+      client: r.client_name || r.client_id,
+      clientUri: r.client_uri,
+      scopes: r.scope ? r.scope.split(" ") : [],
+      authorizedAt: new Date(r.created).toISOString(),
+      lastIssuedAt: r.last_issued
+        ? new Date(r.last_issued).toISOString()
+        : null,
+      activeTokens: r.active,
+    })),
+  };
+}
+
+export async function revokeGrantFor(p: Principal, env: Env, grantId: string) {
+  const row = await env.DB.prepare(
+    "SELECT id FROM oauth_grants WHERE id=? AND subject=? AND revoked IS NULL",
+  )
+    .bind(grantId, p.subject)
+    .first<{ id: string }>();
+  assert(row, "Authorization not found", 404);
+  await revokeGrant(env, grantId);
+  return { revoked: true, id: grantId };
+}
+
 async function revokeGrant(env: Env, grantId: string) {
   await env.DB.batch([
     env.DB.prepare("UPDATE oauth_grants SET revoked=? WHERE id=?").bind(

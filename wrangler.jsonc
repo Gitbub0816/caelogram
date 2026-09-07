@@ -18,6 +18,9 @@
     {
       "binding": "DB",
       "database_name": "caelogram",
+      // Pinned: resolving by name alone lets a deploy bind to a different
+      // database than the one the CLI migrates.
+      "database_id": "bacf0d94-4342-4ae3-a9c3-6b290f81978c",
       "migrations_dir": "cloudflare/migrations",
     },
   ],

@@ -32,6 +32,8 @@ import {
   oauthIdentity,
   looksLikeOAuthToken,
   oauthCleanupStatements,
+  listGrants,
+  revokeGrantFor,
 } from "./oauth.js";
 export interface Env {
   INDEX_QUEUE?: Queue<{ tenant: string; job: string }>;
@@ -310,6 +312,14 @@ async function route(
         req.method === "DELETE"
       )
         s.allowed(p, "admin");
+      if (path === "/api/oauth-grants" && req.method === "GET")
+        return reply(await listGrants(p, env));
+      if (path.startsWith("/api/oauth-grants/") && req.method === "DELETE") {
+        const id = decodeURIComponent(path.slice("/api/oauth-grants/".length));
+        const result = await revokeGrantFor(p, env, id);
+        await s.store.audit(p.tenant, p.subject, "oauth.grant_revoked", id);
+        return reply(result);
+      }
       if (path === "/api/agent-tokens" && req.method === "GET")
         return reply(await listAgentTokens(env, p));
       if (path.startsWith("/api/agent-tokens/") && req.method === "DELETE") {
@@ -579,6 +589,8 @@ export async function processCloudJobs(env: Env) {
       await env.INDEX_QUEUE.send({ tenant: job.tenant, job: job.id });
     else await advanceIndex(env, job.tenant, job.id);
   }
+  const missingTables = new Set<string>(),
+    failures: string[] = [];
   // Housekeeping is best-effort and independent. A single failing statement —
   // most often a table an unapplied migration never created — used to abort the
   // whole scheduled run, silently skipping every later step.
@@ -587,15 +599,25 @@ export async function processCloudJobs(env: Env) {
     ["DELETE FROM agent_tokens WHERE expires<?", Date.now()],
     ["DELETE FROM access_cache WHERE expires<?", Date.now() - 86_400_000],
     ...oauthCleanupStatements(),
-  ] as readonly (readonly [string, number])[])
+  ] as readonly (readonly [string, number])[]) {
     try {
       await env.DB.prepare(statement).bind(cutoff).run();
     } catch (e) {
-      console.error(
-        `Scheduled cleanup failed: ${statement} — ${e instanceof Error ? e.message : e}. ` +
-          "If this names a missing table, apply the D1 migrations: wrangler d1 migrations apply caelogram --remote",
-      );
+      const message = e instanceof Error ? e.message : String(e);
+      const table = /no such table: (\w+)/.exec(message)?.[1];
+      if (table) missingTables.add(table);
+      else failures.push(`${statement} — ${message}`);
     }
+  }
+  // One line per run, not one per statement: this loop is on a one-minute cron,
+  // and a single unapplied migration would otherwise bury the log.
+  if (missingTables.size)
+    console.error(
+      `Scheduled cleanup skipped ${missingTables.size} missing table(s): ${[...missingTables].sort().join(", ")}. ` +
+        "Apply the D1 migrations: wrangler d1 migrations apply caelogram --remote",
+    );
+  if (failures.length)
+    console.error(`Scheduled cleanup failed: ${failures.join("; ")}`);
   const s = service(env);
   // One scheduler at a time, and durable per-tenant mutation locks below.
   await s.store.exclusive("$scheduler", async () => {
