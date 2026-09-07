@@ -37,14 +37,24 @@ npm run cli -- map /path/to/existing/repository --ref main --task "Change paymen
 
 Mapping writes metadata (no source bodies) to `.caelogram/map.json` in that checkout. Add `.caelogram/` to its local exclude file if desired. The MVP accepts up to 5,000 eligible text files / 25 MB; unsupported files, credential files, symlinks, submodules, generated/vendor directories, and files larger than 256 KB are excluded.
 
-To use the `caelogram` executable after building, run `npm link` in this checkout. Node 24 and Git are required on Windows, macOS, and Linux.
+## Install the CLI
+
+Node 24 or newer and Git are required, on Windows, macOS, and Linux. The published package is the CLI alone: a single bundled executable with no runtime dependencies.
+
+```sh
+npx caelogram@latest map /path/to/existing/repository
+npm install --global caelogram
+```
+
+The package is not published yet; until it is, build it from this checkout with `npm run build:cli` and run `npm link`, or run commands through `npm run cli -- …`.
 
 ## Connect GitHub and use the controlled workflow
 
-For the Cloudflare application, follow [Clerk and self-service GitHub setup](docs/authentication.md). Anyone can sign up, authorize the public GitHub App, choose an existing repository and branch, and map it. Create a scoped agent token in Access & integrations, then authenticate the CLI with that **Caelogram** token, never a GitHub token. Map through the browser first; the operator-only `connect --installation` command is for the legacy JWT adapter.
+For the Cloudflare application, follow [Clerk and self-service GitHub setup](docs/authentication.md). Anyone can sign up, authorize the public GitHub App, choose an existing repository and branch, and map it. Map through the browser first; the operator-only `connect --installation` command is for the legacy JWT adapter. The CLI only ever holds a **Caelogram** credential, never a GitHub token.
 
 ```sh
 caelogram login --url https://your-caelogram-service.example
+caelogram logout
 caelogram begin REPOSITORY_ID "Add payment retry handling"
 caelogram submit TASK_ID edits.json --title "Handle payment retries"
 caelogram validate CHANGESET_ID
@@ -54,7 +64,13 @@ caelogram sync REPOSITORY_ID
 caelogram doctor
 ```
 
-Supply `CAELOGRAM_TOKEN` through your shell/secret manager before login. `edits.json` is an array of `{ "path": "src/file.ts", "content": "full replacement source" }`; `null` deletes a file. Existing consumers and newly unresolved imports are checked. Syntax checks **do not mean tests or typechecks passed**. All PRs remain drafts.
+### Signing in
+
+`caelogram login` runs the OAuth 2.0 device authorization grant (RFC 8628). It discovers the authorization server from `/.well-known/oauth-protected-resource` and `/.well-known/oauth-authorization-server` at the service origin, prints a short user code and a verification URL, polls until you approve in the browser, and stores the access and refresh tokens in `~/.config/caelogram/config.json` with owner-only permissions. The access token is refreshed automatically before it expires; `caelogram logout` revokes the tokens and deletes the file.
+
+**This flow needs an authorization server that Caelogram does not yet run.** The client is implemented and tested; the device authorization, token, and revocation endpoints are not. The exact contract the server must meet is [docs/cli-auth-contract.md](docs/cli-auth-contract.md). Until it exists, use the non-interactive fallback: set `CAELOGRAM_TOKEN` to an agent token created in Access & integrations. That variable overrides stored credentials, is never written to disk, and is the supported path for CI and containers.
+
+`edits.json` is an array of `{ "path": "src/file.ts", "content": "full replacement source" }`; `null` deletes a file. Existing consumers and newly unresolved imports are checked. Syntax checks **do not mean tests or typechecks passed**. All PRs remain drafts.
 
 ## AI integrations
 
