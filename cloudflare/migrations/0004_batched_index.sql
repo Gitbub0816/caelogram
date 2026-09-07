@@ -1,0 +1,10 @@
+CREATE TABLE index_repos(tenant TEXT NOT NULL,id TEXT NOT NULL,name TEXT NOT NULL,branch TEXT NOT NULL,installation INTEGER NOT NULL,current_job TEXT,latest_job TEXT,PRIMARY KEY(tenant,id),UNIQUE(tenant,name,branch));
+CREATE TABLE index_jobs(tenant TEXT NOT NULL,id TEXT NOT NULL,repo TEXT NOT NULL,revision TEXT NOT NULL,phase TEXT NOT NULL DEFAULT 'discovering',bytes INTEGER NOT NULL DEFAULT 0,files INTEGER NOT NULL DEFAULT 0,done INTEGER NOT NULL DEFAULT 0,resolved INTEGER NOT NULL DEFAULT 0,excluded INTEGER NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0,owner TEXT,lease INTEGER NOT NULL DEFAULT 0,error TEXT,created TEXT NOT NULL,PRIMARY KEY(tenant,id));
+CREATE INDEX index_jobs_pending ON index_jobs(phase,lease);
+ALTER TABLE index_jobs ADD COLUMN symbols INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE index_jobs ADD COLUMN relationships INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE index_dirs(tenant TEXT NOT NULL,job TEXT NOT NULL,path TEXT NOT NULL,sha TEXT NOT NULL,done INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(tenant,job,path));
+CREATE TABLE index_files(tenant TEXT NOT NULL,job TEXT NOT NULL,path TEXT NOT NULL,sha TEXT NOT NULL,bytes INTEGER NOT NULL,blob TEXT,metadata TEXT,done INTEGER NOT NULL DEFAULT 0,resolved INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(tenant,job,path));
+CREATE TABLE index_edges(tenant TEXT NOT NULL,job TEXT NOT NULL,src TEXT NOT NULL,dst TEXT NOT NULL,kind TEXT NOT NULL,evidence TEXT NOT NULL,PRIMARY KEY(tenant,job,src,dst,kind));
+CREATE INDEX index_edges_incoming ON index_edges(tenant,job,dst);
+CREATE TABLE index_blobs(tenant TEXT NOT NULL,job TEXT NOT NULL,blob TEXT NOT NULL,PRIMARY KEY(tenant,job,blob));

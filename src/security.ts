@@ -41,6 +41,7 @@ export function constantEqual(a: string, b: string) {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 export class Fault extends Error {
+  retryAfterSeconds?: number;
   constructor(
     public status: number,
     message: string,
