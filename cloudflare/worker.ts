@@ -16,6 +16,9 @@ import {
   clerkIdentity,
   clerkIssuer,
   availableRepositories,
+  resolveAccess,
+  agentWorkspaces,
+  identityTenant,
   startGitHub,
   finishGitHub,
 } from "./onboarding.js";
@@ -62,8 +65,13 @@ async function principal(req: Request, env: Env): Promise<Principal> {
   const bearer = req.headers
     .get("authorization")
     ?.match(/^Bearer (caeg_.+)$/)?.[1];
-  if (bearer && (env.CLERK_ISSUER || env.CLERK_PUBLISHABLE_KEY))
-    return agentIdentity(bearer, env);
+  if (bearer && (env.CLERK_ISSUER || env.CLERK_PUBLISHABLE_KEY)) {
+    const agent = await agentIdentity(bearer, env);
+    // The token carries repository names its issuer proved through GitHub; the
+    // workspaces holding those repositories follow from the names, not the token.
+    agent.tenants = await agentWorkspaces(env, agent);
+    return agent;
+  }
   if (env.CLERK_ISSUER || env.CLERK_PUBLISHABLE_KEY)
     return clerkIdentity(req, env);
   assert(
@@ -271,25 +279,33 @@ async function route(req: Request, env: Env): Promise<Response> {
         await s.store.audit(p.tenant, p.subject, "agent.revoked", id);
         return reply({ revoked: true });
       }
-      if (path === "/api/audit" && req.method === "GET")
-        return reply(await s.store.events(p.tenant));
-      // Owners can delete their retained data even after GitHub access is revoked.
+      // Owners can delete data retained under their own identity even after
+      // GitHub access is revoked. Workspace data is deleted below, where GitHub
+      // has said the caller still has access to the repository.
       if (path.startsWith("/api/repositories/") && req.method === "DELETE") {
         const id = decodeURIComponent(path.slice(18));
+        const own = identityTenant(p.subject);
         const repo =
           (await s
-            .q(
-              "SELECT name FROM index_repos WHERE tenant=? AND id=?",
-              p.tenant,
-              id,
-            )
+            .q("SELECT name FROM index_repos WHERE tenant=? AND id=?", own, id)
             .first<{ name: string }>()) ||
-          (await s.store.get<Repository>(p.tenant, "repo", id));
-        return reply(
-          await s.store.exclusive(p.tenant, () =>
-            s.remove({ ...p, repositories: [repo.name] }, id),
-          ),
-        );
+          (await s.store
+            .get<Repository>(own, "repo", id)
+            .catch(() => null as Repository | null));
+        if (repo)
+          return reply(
+            await s.store.exclusive(own, () =>
+              s.remove(
+                {
+                  ...p,
+                  tenant: own,
+                  tenants: [own],
+                  repositories: [repo.name],
+                },
+                id,
+              ),
+            ),
+          );
       }
       if (path === "/api/github/start" && req.method === "POST") {
         const start = await startGitHub(p, env);
@@ -299,6 +315,9 @@ async function route(req: Request, env: Env): Promise<Response> {
         );
       }
       if (path === "/api/github/disconnect" && req.method === "POST") {
+        await env.DB.prepare("DELETE FROM access_cache WHERE principal=?")
+          .bind(identityTenant(p.subject))
+          .run();
         await s.store.exclusive(p.tenant, async () => {
           await s.store.remove(p.tenant, "github-link", "current");
           await env.DB.prepare("DELETE FROM agent_tokens WHERE tenant=?")
@@ -313,15 +332,39 @@ async function route(req: Request, env: Env): Promise<Response> {
         });
         return reply({ disconnected: true });
       }
-      const available = await availableRepositories(s.store, p.tenant, env);
+      // GitHub decides what this person can see. Nothing below this line takes
+      // a tenant, repository or role from the request.
+      const access = await resolveAccess(s.store, env, p, {
+        // The Connect page's explicit refresh must ask GitHub, not the cache.
+        force: path === "/api/github/repositories",
+      });
+      const available = access.repositories;
       p.repositories = available
         .map((r) => r.name)
         .filter(
           (name) => p.scopes.includes("admin") || p.repositories.includes(name),
         );
-      s.installations = {
-        [p.tenant]: [...new Set(available.map((r) => r.installationId))],
-      };
+      p.tenants = access.tenants;
+      s.installations = access.installations;
+      s.workspaces = access.workspaces;
+      if (path === "/api/audit" && req.method === "GET") {
+        // One trail per workspace: merge the workspaces GitHub still grants,
+        // plus this person's own. Another person's identity trail is not theirs.
+        const trails = await Promise.all(
+          [
+            ...new Set([
+              identityTenant(p.subject),
+              ...available.map((r) => r.tenant),
+            ]),
+          ].map((tenant) => s.store.events(tenant)),
+        );
+        return reply(
+          trails
+            .flat()
+            .sort((a: any, b: any) => String(b.at).localeCompare(String(a.at)))
+            .slice(0, 100),
+        );
+      }
       if (path === "/api/github/repositories" && req.method === "GET")
         return reply({
           repositories: available,
@@ -396,12 +439,13 @@ async function route(req: Request, env: Env): Promise<Response> {
       s.allowed(p, "admin");
       return reply(await s.store.events(p.tenant));
     }
-    if (path.startsWith("/api/repositories/") && req.method === "DELETE")
-      return reply(
-        await s.store.exclusive(p.tenant, () =>
-          s.remove(p, decodeURIComponent(path.slice(18))),
-        ),
-      );
+    if (path.startsWith("/api/repositories/") && req.method === "DELETE") {
+      const id = decodeURIComponent(path.slice(18));
+      // Resolve the workspace first so the change lock covers the workspace the
+      // index actually lives in, not the caller's own key.
+      await s.record(p, id).catch(() => null);
+      return reply(await s.store.exclusive(p.tenant, () => s.remove(p, id)));
+    }
     throw new Fault(404, "Route not found");
   }
   return env.ASSETS.fetch(req);
@@ -422,6 +466,9 @@ export async function processCloudJobs(env: Env) {
     .run();
   await env.DB.prepare("DELETE FROM agent_tokens WHERE expires<?")
     .bind(Date.now())
+    .run();
+  await env.DB.prepare("DELETE FROM access_cache WHERE expires<?")
+    .bind(Date.now() - 86_400_000)
     .run();
   const s = service(env);
   // One scheduler at a time, and durable per-tenant mutation locks below.

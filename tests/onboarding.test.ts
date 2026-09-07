@@ -50,6 +50,7 @@ test("Clerk identity rejects wrong origin/expired sessions and ignores caller-su
   assert.deepEqual(await clerkIdentity(request(await session()), env), {
     subject: "user_a",
     tenant: "user:user_a",
+    tenants: ["user:user_a"],
     scopes: ["admin"],
     repositories: [],
   });
@@ -143,18 +144,29 @@ test("self-service OAuth binds browser and tenant, rejects replay, rotates encry
           });
         if (url.includes("/user/installations/1/repositories"))
           return Response.json({
-            total_count: 3,
+            total_count: 4,
             repositories: [
               {
                 full_name: "owner/writable",
                 default_branch: "main",
                 permissions: { push: true },
+                owner: { login: "owner", id: 42, type: "Organization" },
               },
-              { full_name: "owner/readonly", permissions: { push: false } },
+              {
+                full_name: "owner/readonly",
+                permissions: { push: false },
+                owner: { login: "owner", id: 42, type: "Organization" },
+              },
               {
                 full_name: "owner/archived",
                 permissions: { push: true },
                 archived: true,
+                owner: { login: "owner", id: 42, type: "Organization" },
+              },
+              {
+                full_name: "mystery/unknown-owner",
+                default_branch: "main",
+                permissions: { push: true },
               },
             ],
           });
@@ -194,8 +206,16 @@ test("self-service OAuth binds browser and tenant, rejects replay, rotates encry
       ...link,
       expiresAt: Date.now() - 1,
     });
+    // The repository whose owner GitHub did not describe is omitted, never
+    // assigned to a guessed workspace.
     assert.deepEqual(await availableRepositories(store, p.tenant, env), [
-      { name: "owner/writable", branch: "main", installationId: 1 },
+      {
+        name: "owner/writable",
+        branch: "main",
+        installationId: 1,
+        owner: { login: "owner", id: 42, type: "org" },
+        tenant: "gh:org:42",
+      },
     ]);
     await availableRepositories(store, p.tenant, env);
     assert.equal(refreshes, 1);

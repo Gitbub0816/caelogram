@@ -117,11 +117,7 @@ export class BatchedService extends Service<CloudStore> {
     }
     if (name === "expand_impact") {
       const t = await this.task(p, a.taskId);
-      const exists = await this.q(
-        "SELECT id FROM index_repos WHERE tenant=? AND id=?",
-        p.tenant,
-        t.repoId,
-      ).first();
+      const exists = await this.locate(p, t.repoId);
       if (!exists) return;
       const g = await this.boundedGraph(
         p,
@@ -141,11 +137,7 @@ export class BatchedService extends Service<CloudStore> {
       };
     }
     if (name === "find_component") {
-      const exists = await this.q(
-        "SELECT id FROM index_repos WHERE tenant=? AND id=?",
-        p.tenant,
-        a.repoId,
-      ).first();
+      const exists = await this.locate(p, a.repoId);
       if (!exists) return;
       const j = await this.current(p, a.repoId);
       const rows = await this.q(
@@ -180,12 +172,53 @@ export class BatchedService extends Service<CloudStore> {
   q(sql: string, ...args: any[]) {
     return this.env.DB.prepare(sql).bind(...args);
   }
-  async record(p: Principal, id: string) {
-    const r = await this.q(
-      "SELECT * FROM index_repos WHERE tenant=? AND id=?",
-      p.tenant,
+  /**
+   * Repository full name → workspace tenant, from the caller's GitHub grants.
+   * Set per request by the worker; never populated from client input.
+   */
+  workspaces?: Record<string, string>;
+  /** Every workspace this principal may read. GitHub decided this, not the browser. */
+  private reach(p: Principal) {
+    return [...new Set([p.tenant, ...(p.tenants ?? [])])];
+  }
+  /**
+   * Resolve which workspace holds a repository and make it the active tenant
+   * for the rest of the request. A signed-in person reaches several workspaces,
+   * and the row that exists in one of them decides which; per-repository
+   * authorization still runs afterwards against GitHub-derived names.
+   */
+  private async locate(p: Principal, id: string) {
+    const tenants = this.reach(p);
+    const row = await this.q(
+      `SELECT * FROM index_repos WHERE id=? AND tenant IN (${tenants.map(() => "?").join(",")})`,
       id,
+      ...tenants,
     ).first<Repo>();
+    if (row) p.tenant = row.tenant;
+    return row;
+  }
+  /** Same resolution for a stored object addressed by id alone. */
+  private async locateObject(p: Principal, kind: string, id: string) {
+    const tenants = this.reach(p);
+    if (tenants.length < 2) return;
+    const row = await this.q(
+      `SELECT tenant FROM objects WHERE kind=? AND id=? AND tenant IN (${tenants.map(() => "?").join(",")})`,
+      kind,
+      id,
+      ...tenants,
+    ).first<{ tenant: string }>();
+    if (row) p.tenant = row.tenant;
+  }
+  async task(p: Principal, id: string) {
+    await this.locateObject(p, "task", id);
+    return super.task(p, id);
+  }
+  async change(p: Principal, id: string) {
+    await this.locateObject(p, "change", id);
+    return super.change(p, id);
+  }
+  async record(p: Principal, id: string) {
+    const r = await this.locate(p, id);
     assert(r, "Repository not found", 404);
     this.allowed(p, "read", r.name);
     return r;
@@ -225,17 +258,32 @@ export class BatchedService extends Service<CloudStore> {
     installationId: number,
   ): Promise<any> {
     this.allowed(p, "admin", name);
+    // The index belongs to the workspace of the GitHub account that owns the
+    // repository, so a colleague re-indexing it updates the shared index rather
+    // than starting a private one. An index that already exists in a workspace
+    // this principal reaches keeps its home, which is how a pre-workspace index
+    // survives migration 0006 without being copied.
+    const tenants = this.reach(p);
+    const held = await this.q(
+      `SELECT * FROM index_repos WHERE name=? AND branch=? AND tenant IN (${tenants.map(() => "?").join(",")})`,
+      name,
+      branch,
+      ...tenants,
+    ).first<Repo>();
+    p = { ...p, tenant: held?.tenant ?? this.workspaces?.[name] ?? p.tenant };
     assert(
       this.installations?.[p.tenant]?.includes(installationId),
       "Installation access denied",
       403,
     );
-    const id = digest([p.tenant, name, branch]);
-    const existing = await this.q(
-      "SELECT * FROM index_repos WHERE tenant=? AND id=?",
-      p.tenant,
-      id,
-    ).first<Repo>();
+    const id = held?.id ?? digest([p.tenant, name, branch]);
+    const existing =
+      held ??
+      (await this.q(
+        "SELECT * FROM index_repos WHERE tenant=? AND id=?",
+        p.tenant,
+        id,
+      ).first<Repo>());
     if (existing?.latest_job) {
       const prior = await this.job(p.tenant, existing.latest_job);
       assert(
@@ -335,10 +383,14 @@ export class BatchedService extends Service<CloudStore> {
       reused: 0,
     };
   }
+  // Every workspace at once: a repository a colleague indexed is listed here
+  // because GitHub grants this principal the repository, not because they own
+  // the index. Names are still filtered against those GitHub-derived grants.
   async list(p: Principal) {
+    const tenants = this.reach(p);
     const rows = await this.q(
-      "SELECT * FROM index_repos WHERE tenant=? ORDER BY name LIMIT 100",
-      p.tenant,
+      `SELECT * FROM index_repos WHERE tenant IN (${tenants.map(() => "?").join(",")}) ORDER BY name LIMIT 100`,
+      ...tenants,
     ).all<Repo>();
     const result = await Promise.all(
       rows.results
@@ -348,14 +400,14 @@ export class BatchedService extends Service<CloudStore> {
         )
         .map((r) => this.summaryRecord(r)),
     );
-    return [...result, ...(await super.list(p))];
+    const legacy = (
+      await Promise.all(tenants.map((tenant) => super.list({ ...p, tenant })))
+    ).flat();
+    const seen = new Set(result.map((r) => r.id));
+    return [...result, ...legacy.filter((r) => !seen.has(r.id))];
   }
   async repo(p: Principal, id: string): Promise<Repository> {
-    const raw = await this.q(
-      "SELECT * FROM index_repos WHERE tenant=? AND id=?",
-      p.tenant,
-      id,
-    ).first<Repo>();
+    const raw = await this.locate(p, id);
     if (!raw) return super.repo(p, id);
     this.allowed(p, "read", raw.name);
     assert(
@@ -389,11 +441,7 @@ export class BatchedService extends Service<CloudStore> {
     return j;
   }
   async remove(p: Principal, id: string): Promise<any> {
-    const found = await this.q(
-      "SELECT id FROM index_repos WHERE tenant=? AND id=?",
-      p.tenant,
-      id,
-    ).first();
+    const found = await this.locate(p, id);
     if (!found) return super.remove(p, id);
     const r = await this.record(p, id);
     this.allowed(p, "admin", r.name);
@@ -466,22 +514,14 @@ export class BatchedService extends Service<CloudStore> {
     };
   }
   async map(p: Principal, id: string) {
-    const r = await this.q(
-      "SELECT id FROM index_repos WHERE tenant=? AND id=?",
-      p.tenant,
-      id,
-    ).first();
+    const r = await this.locate(p, id);
     return r ? this.mapPage(p, id) : super.map(p, id);
   }
   // Whole-repository galaxy. Reads only the columns the visualisation needs so
   // a 2,000+ file index fits in one response: file metadata blobs are never
   // touched, and edges come back index-encoded.
   async galaxy(p: Principal, id: string): Promise<GalaxyData> {
-    const record = await this.q(
-      "SELECT id FROM index_repos WHERE tenant=? AND id=?",
-      p.tenant,
-      id,
-    ).first();
+    const record = await this.locate(p, id);
     if (!record) return super.galaxy(p, id);
     const j = await this.current(p, id),
       r = await this.record(p, id);
@@ -533,11 +573,7 @@ export class BatchedService extends Service<CloudStore> {
     id: string,
     path: string,
   ): Promise<ComponentDetail> {
-    const record = await this.q(
-      "SELECT id FROM index_repos WHERE tenant=? AND id=?",
-      p.tenant,
-      id,
-    ).first();
+    const record = await this.locate(p, id);
     if (!record) return super.component(p, id, path);
     const j = await this.current(p, id);
     const row = await this.q(
@@ -676,11 +712,7 @@ export class BatchedService extends Service<CloudStore> {
     return g;
   }
   async begin(p: Principal, repoId: string, prompt: string, budget: number) {
-    const exists = await this.q(
-      "SELECT id FROM index_repos WHERE tenant=? AND id=?",
-      p.tenant,
-      repoId,
-    ).first();
+    const exists = await this.locate(p, repoId);
     if (!exists) return super.begin(p, repoId, prompt, budget);
     this.allowed(p, "write");
     const j = await this.current(p, repoId);
@@ -724,11 +756,7 @@ export class BatchedService extends Service<CloudStore> {
     return t;
   }
   async graph(p: Principal, t: Task) {
-    const exists = await this.q(
-      "SELECT id FROM index_repos WHERE tenant=? AND id=?",
-      p.tenant,
-      t.repoId,
-    ).first();
+    const exists = await this.locate(p, t.repoId);
     if (!exists) return super.graph(p, t);
     return this.boundedGraph(p, await this.current(p, t.repoId, t.base), [
       ...new Set([
@@ -740,11 +768,7 @@ export class BatchedService extends Service<CloudStore> {
   async validate(p: Principal, id: string) {
     const c = await this.change(p, id),
       t = await this.task(p, c.taskId);
-    const exists = await this.q(
-      "SELECT id FROM index_repos WHERE tenant=? AND id=?",
-      p.tenant,
-      t.repoId,
-    ).first();
+    const exists = await this.locate(p, t.repoId);
     if (!exists) return super.validate(p, id);
     const j = await this.current(p, t.repoId, t.base);
     const paths = new Set(c.edits.map((e) => e.path));
@@ -785,11 +809,7 @@ export class BatchedService extends Service<CloudStore> {
     reason: string,
   ) {
     const t = await this.task(p, taskId);
-    const exists = await this.q(
-      "SELECT id FROM index_repos WHERE tenant=? AND id=?",
-      p.tenant,
-      t.repoId,
-    ).first();
+    const exists = await this.locate(p, t.repoId);
     if (!exists) return super.read(p, taskId, path, start, end, reason);
     const j = await this.current(p, t.repoId, t.base);
     assert(
