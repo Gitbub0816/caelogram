@@ -71,7 +71,27 @@ test("HTTP authentication, origin checks, demo resolution and MCP lifecycle", as
       }),
     );
     const tools = await client.listTools();
-    assert.equal(tools.tools.length, 14);
+    assert.deepEqual(
+      tools.tools.map((tool) => tool.name).sort(),
+      [
+        "begin_change",
+        "changeset_status",
+        "connect_repository",
+        "expand_impact",
+        "find_component",
+        "get_context",
+        "index_status",
+        "list_repositories",
+        "map_page",
+        "publish_pull_request",
+        "read_section",
+        "repository_map",
+        "source_search",
+        "submit_changeset",
+        "sync_repository",
+        "validate_changeset",
+      ].sort(),
+    );
     const result = await client.callTool({
       name: "list_repositories",
       arguments: {},
