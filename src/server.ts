@@ -67,15 +67,33 @@ export function createServer(service: Service, devToken?: string) {
   app.get("/health", (_req, res) =>
     res.json({ status: "ok", version: "0.1.0" }),
   );
-  app.get("/.well-known/oauth-protected-resource", (_req, res) =>
-    res.json({
+  // RFC 9728. The local adapter is a resource server only: it never issues
+  // tokens, so it names the authorization server it trusts rather than itself.
+  app.get("/.well-known/oauth-protected-resource{*rest}", (_req, res) =>
+    res.set("Cache-Control", "no-store").json({
       resource: process.env.CAELOGRAM_AUDIENCE ?? origin,
       authorization_servers: process.env.CAELOGRAM_ISSUER
         ? [process.env.CAELOGRAM_ISSUER]
         : [],
       scopes_supported: ["read", "write", "publish", "admin"],
       bearer_methods_supported: ["header"],
+      resource_name: "Caelogram (local adapter)",
     }),
+  );
+  // RFC 8414 is served by the authorization server itself. In the deployed
+  // product that is the Cloudflare Worker (cloudflare/oauth.ts); this adapter
+  // authenticates with a development bearer token or an external OIDC issuer
+  // and would be lying if it advertised endpoints it does not implement.
+  app.get("/.well-known/oauth-authorization-server{*rest}", (_req, res) =>
+    res
+      .status(404)
+      .set("Cache-Control", "no-store")
+      .json({
+        error: "not_found",
+        error_description: process.env.CAELOGRAM_ISSUER
+          ? `This adapter is a resource server. Its authorization server is ${process.env.CAELOGRAM_ISSUER}; read its metadata there.`
+          : "The local adapter is not an OAuth authorization server. Deploy the Cloudflare Worker, which is one, or set CAELOGRAM_ISSUER to an external authorization server.",
+      }),
   );
   app.post(
     "/webhooks/github",

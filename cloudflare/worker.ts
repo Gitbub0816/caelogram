@@ -27,6 +27,12 @@ import {
   issueAgentToken,
   listAgentTokens,
 } from "./agent-tokens.js";
+import {
+  oauthRoute,
+  oauthIdentity,
+  looksLikeOAuthToken,
+  oauthCleanupStatements,
+} from "./oauth.js";
 export interface Env {
   INDEX_QUEUE?: Queue<{ tenant: string; job: string }>;
   CLERK_ISSUER?: string;
@@ -42,6 +48,8 @@ export interface Env {
   DATA_KEY: string;
   JWKS_URL: string;
   ISSUER: string;
+  /** HMAC key for Caelogram-issued OAuth credentials; falls back to DATA_KEY. */
+  OAUTH_SIGNING_KEY?: string;
   AUDIENCE: string;
   GITHUB_APP_ID: string;
   GITHUB_PRIVATE_KEY: string;
@@ -62,6 +70,18 @@ function clerkOriginForCsp(env: Env) {
   }
 }
 async function principal(req: Request, env: Env): Promise<Principal> {
+  const presented = req.headers
+    .get("authorization")
+    ?.match(/^Bearer (.+)$/)?.[1];
+  // A token this authorization server issued. It carries an identity and the
+  // scope its owner consented to; repositories are resolved from GitHub below,
+  // exactly as they are for a browser session.
+  if (
+    presented &&
+    looksLikeOAuthToken(presented) &&
+    (env.CLERK_ISSUER || env.CLERK_PUBLISHABLE_KEY)
+  )
+    return oauthIdentity(presented, env);
   const bearer = req.headers
     .get("authorization")
     ?.match(/^Bearer (caeg_.+)$/)?.[1];
@@ -151,7 +171,13 @@ async function route(req: Request, env: Env): Promise<Response> {
   if (
     path.startsWith("/api/") ||
     path === "/mcp" ||
-    path === "/auth/github/callback"
+    path === "/auth/github/callback" ||
+    path === "/token" ||
+    path === "/register" ||
+    path === "/device_authorization" ||
+    path === "/revoke" ||
+    path === "/authorize" ||
+    path === "/device"
   ) {
     const limit = await env.REQUEST_LIMIT.limit({
       key: req.headers.get("CF-Connecting-IP") || "local",
@@ -159,14 +185,20 @@ async function route(req: Request, env: Env): Promise<Response> {
     assert(limit.success, "Request limit reached; retry in one minute", 429);
   }
   if (path === "/health") return reply({ status: "ok", runtime: "cloudflare" });
-  if (path.startsWith("/.well-known/oauth-protected-resource"))
-    return reply({
-      resource: env.PUBLIC_ORIGIN,
-      authorization_servers: env.ISSUER ? [env.ISSUER] : [],
-      scopes_supported: ["read", "write", "publish", "admin"],
-      bearer_methods_supported: ["header"],
-    });
   const origin = req.headers.get("origin");
+  // The authorization server. Its token, registration, revocation and metadata
+  // endpoints are called cross-origin by MCP clients and carry no cookies, so
+  // they answer before the browser origin check; the two cookie-authenticated
+  // pages (/authorize, /device) enforce the origin themselves on POST.
+  if (!(
+    (path === "/authorize" || path === "/device") &&
+    req.method === "POST" &&
+    origin &&
+    origin !== (env.PUBLIC_ORIGIN || url.origin)
+  )) {
+    const handled = await oauthRoute(req, env, path);
+    if (handled) return handled;
+  } else assert(false, "Origin rejected", 403);
   assert(
     !origin || origin === (env.PUBLIC_ORIGIN || url.origin),
     "Origin rejected",
@@ -339,11 +371,15 @@ async function route(req: Request, env: Env): Promise<Response> {
         force: path === "/api/github/repositories",
       });
       const available = access.repositories;
+      // An agent token names the repositories its issuer proved through GitHub,
+      // and is narrowed to those. A browser session, and an OAuth token which
+      // carries the wildcard instead of a list, reach whatever GitHub grants
+      // this person right now — which is the only source of the list either way.
+      const everything =
+        p.scopes.includes("admin") || p.repositories.includes("*");
       p.repositories = available
         .map((r) => r.name)
-        .filter(
-          (name) => p.scopes.includes("admin") || p.repositories.includes(name),
-        );
+        .filter((name) => everything || p.repositories.includes(name));
       p.tenants = access.tenants;
       s.installations = access.installations;
       s.workspaces = access.workspaces;
@@ -366,6 +402,13 @@ async function route(req: Request, env: Env): Promise<Response> {
           "index_edges",
           "access_cache",
           "tenant_backfill",
+          "oauth_clients",
+          "oauth_pending",
+          "oauth_codes",
+          "oauth_grants",
+          "oauth_tokens",
+          "oauth_devices",
+          "oauth_rate",
         ];
         const present = new Set(
           (
@@ -534,7 +577,8 @@ export async function processCloudJobs(env: Env) {
     ["DELETE FROM oauth_states WHERE expires<?", Date.now()],
     ["DELETE FROM agent_tokens WHERE expires<?", Date.now()],
     ["DELETE FROM access_cache WHERE expires<?", Date.now() - 86_400_000],
-  ] as const)
+    ...oauthCleanupStatements(),
+  ] as readonly (readonly [string, number])[])
     try {
       await env.DB.prepare(statement).bind(cutoff).run();
     } catch (e) {

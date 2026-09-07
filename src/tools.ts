@@ -183,6 +183,27 @@ export async function dispatch(
     "validate_changeset",
     "publish_pull_request",
   ].includes(name);
+  // Resolve which workspace holds the target *before* taking the mutation lock.
+  // The lock key is the active tenant, so locking on the caller's own key let
+  // two colleagues mutating the same shared workspace take two different locks.
+  // Every resolver below also re-checks authorization inside execute(); a
+  // failure here is left to that path so the error text stays the real one.
+  if (mutation && store.exclusive) {
+    const locator = service as typeof service & {
+      record?: (p: Principal, id: string) => Promise<unknown>;
+      workspaces?: Record<string, string>;
+    };
+    if (typeof a.repoId === "string" && locator.record)
+      await locator.record(p, a.repoId).catch(() => undefined);
+    else if (typeof a.changesetId === "string")
+      await service.change(p, a.changesetId).catch(() => undefined);
+    else if (typeof a.taskId === "string" && !task)
+      await service.task(p, a.taskId).catch(() => undefined);
+    else if (typeof a.name === "string" && locator.workspaces?.[a.name])
+      // connect_repository names a repository that may have no index yet; the
+      // workspace comes from the caller's GitHub grants, never from the request.
+      p.tenant = locator.workspaces[a.name];
+  }
   const custom = await service.customTool(p, name, a);
   const value = custom
     ? custom.result

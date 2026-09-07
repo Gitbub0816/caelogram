@@ -2,12 +2,19 @@
 
 `caelogram login` implements the OAuth 2.0 device authorization grant
 ([RFC 8628](https://www.rfc-editor.org/rfc/rfc8628)) against whatever
-authorization server the service origin points at. The client exists today in
-`src/auth.ts`; **the authorization server does not exist yet**. This document is
-the contract the server must satisfy. Anything not listed here is not relied
-upon by the CLI.
+authorization server the service origin points at. The client is `src/auth.ts`;
+the server is `cloudflare/oauth.ts`, and **it satisfies this contract as
+written — nothing below was renegotiated**. Anything not listed here is not
+relied upon by the CLI.
 
 Client behaviour is covered by `tests/auth.test.ts` against a stub HTTP layer.
+The two halves are covered together in `tests/oauth.test.ts`, where the real
+client functions run discovery, device login, refresh and logout against the
+real worker over miniflare.
+
+The endpoints the deployed server publishes are `POST /device_authorization`,
+`POST /token` and `POST /revoke`, with the verification page at `/device`; the
+CLI reads them from metadata and never hardcodes them.
 
 ## 0. Client identity
 
@@ -183,14 +190,25 @@ is still read, so existing installs keep working.
 supported path for CI and containers. It exists so automation does not need a
 browser — not so humans paste tokens.
 
-## 8. What the server author still owns
+## 8. How the server holds up its end
 
-- Registering `caelogram-cli` as a public client and serving both `.well-known`
-  documents (Caelogram serves the protected-resource one already).
-- The user-facing verification page: entering the user code, authenticating the
-  human, showing the requested scope, and approve/deny.
-- Binding issued tokens to the workspace and repository grants the existing
-  agent tokens already carry, and honouring `scope`.
-- Rate limiting the device authorization endpoint, expiring unclaimed device
-  codes, and rejecting a device code twice-redeemed.
-- Refresh token rotation and revocation semantics.
+All of it is implemented in `cloudflare/oauth.ts`:
+
+- `caelogram-cli` is pre-registered as a public client by migration 0007, and
+  both `.well-known` documents are served by the Worker, which is now its own
+  authorization server.
+- `/device` is the verification page: it identifies the human through their
+  Clerk browser session, shows the client name and the requested scopes, and
+  takes an approve/deny decision behind a CSRF token.
+- Issued tokens carry an identity and the consented scope only. Repository
+  access is resolved from GitHub on every request by `resolveAccess()`, so a
+  token can never reach more than its owner can, and honours `scope`.
+- The device endpoint is rate limited per address, device codes expire after 15
+  minutes, polling faster than `interval` is answered with `slow_down`, and a
+  device code is redeemable exactly once.
+- Refresh tokens rotate on every use; presenting a rotated one revokes the whole
+  grant. `/revoke` on a refresh token kills every access token issued from it.
+
+One thing worth knowing that the contract does not specify: an access token
+lives 15 minutes, so the CLI's own refresh-before-expiry path is exercised in
+normal use rather than rarely.

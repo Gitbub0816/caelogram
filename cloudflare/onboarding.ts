@@ -103,6 +103,44 @@ export async function clerkIdentity(
 ): Promise<Principal> {
   const token = req.headers.get("authorization")?.match(/^Bearer (.+)$/)?.[1];
   assert(token, "Sign in to continue", 401);
+  return verifyClerkSession(token, env, true);
+}
+
+/**
+ * The signed-in browser behind a server-rendered page (the OAuth consent and
+ * device verification screens), taken from Clerk's `__session` cookie rather
+ * than an Authorization header, because those pages are plain navigations with
+ * no application JavaScript of their own. Returns null when no valid session is
+ * present so the caller can render a "sign in first" page instead of failing.
+ *
+ * Cookie session tokens do not always carry `azp`, so it is enforced only when
+ * present. Issuer, signature, expiry and session id are checked exactly as for
+ * header tokens, and the resulting principal is still nothing more than an
+ * identity key: repositories come from GitHub, never from a token.
+ */
+export async function clerkCookieIdentity(
+  req: Request,
+  env: Env,
+): Promise<Principal | null> {
+  const raw = req.headers
+    .get("cookie")
+    ?.split(";")
+    .map((x) => x.trim())
+    .find((x) => x.startsWith("__session="))
+    ?.slice("__session=".length);
+  if (!raw) return null;
+  try {
+    return await verifyClerkSession(decodeURIComponent(raw), env, false);
+  } catch {
+    return null;
+  }
+}
+
+async function verifyClerkSession(
+  token: string,
+  env: Env,
+  requireAzp: boolean,
+): Promise<Principal> {
   assert(env.PUBLIC_ORIGIN, "Clerk authentication is not configured", 503);
   try {
     const issuer = clerkIssuer(env);
@@ -121,7 +159,9 @@ export async function clerkIdentity(
         payload.sub.startsWith("user_") &&
         typeof payload.exp === "number" &&
         typeof payload.sid === "string" &&
-        payload.azp === env.PUBLIC_ORIGIN,
+        (requireAzp
+          ? payload.azp === env.PUBLIC_ORIGIN
+          : payload.azp === undefined || payload.azp === env.PUBLIC_ORIGIN),
       "Invalid identity",
       401,
     );
