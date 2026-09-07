@@ -52,6 +52,16 @@ export interface ContextItem {
   end: number;
   estimatedTokens: number;
 }
+/** One ranked candidate file. `status` says what the package actually carries. */
+export interface PlanEntry {
+  path: string;
+  rank: number;
+  score: number;
+  reason: string;
+  evidence: string;
+  estimatedTokens: number;
+  status: "included" | "excerpted" | "omitted";
+}
 export interface Context {
   revision: string;
   items: ContextItem[];
@@ -62,6 +72,9 @@ export interface Context {
   sourceTokens: number;
   budget: number;
   seedIds: string[];
+  /** Ranked candidates with per-file cost, so the agent pulls instead of reading everything. */
+  plan?: PlanEntry[];
+  planCount?: number;
 }
 export interface Task {
   id: string;
@@ -70,6 +83,42 @@ export interface Task {
   base: string;
   context: Context;
   createdAt: string;
+  /** Hard ceiling on everything this task may ingest, in estimated tokens. */
+  pullBudget?: number;
+  /** Estimated tokens already delivered for this task. */
+  spent?: number;
+}
+/** What one tool response cost and what it left out. Estimated, never model billing. */
+export interface Accounting {
+  estimatedTokens: number;
+  estimate: string;
+  bound: string;
+  omitted: { what: string; why: string; count?: number }[];
+  task?: {
+    id: string;
+    pullBudget: number;
+    spent: number;
+    remaining: number;
+  };
+}
+/** Compact orientation record. Every count comes from indexed entities. */
+export interface RepositoryBrief {
+  id: string;
+  name: string;
+  branch: string;
+  revision: string;
+  indexedAt: string;
+  status: string;
+  files: number;
+  symbols: number;
+  relationships: number;
+  subsystems: { path: string; files: number; symbols?: number }[];
+  hubs: { path: string; dependents: number }[];
+  entrypoints: { path: string; evidence: string }[];
+  languages: { extension: string; files: number }[];
+  warnings: string[];
+  truncated: { what: string; why: string; count?: number }[];
+  next: string;
 }
 export interface Edit {
   path: string;

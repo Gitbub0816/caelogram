@@ -12,7 +12,7 @@ import type {
   Validation,
 } from "./types.js";
 import { assert, digest, redact, safePath, sensitivePath } from "./security.js";
-import { index, context, impact, tokens, sourceFile } from "./graph.js";
+import { index, context, impact, tokens, sourceFile, brief } from "./graph.js";
 export type GalaxyNode = {
   path: string;
   name: string;
@@ -63,6 +63,54 @@ export type ComponentDetail = {
     confidence: number;
   }[];
 };
+export const MAP_PAGE_FILES = 50,
+  MAP_PAGE_NODES = 1500,
+  MAP_PAGE_BOUNDARY_EDGES = 100,
+  MAP_PAGE_TOKENS = 9000;
+/**
+ * Keep a map page inside its token ceiling. File nodes and the relationships
+ * between them are never dropped; declarations and then boundary relationships
+ * are surrendered first, and every drop is counted in `omissions`.
+ */
+export function fitPage<
+  T extends {
+    nodes: { id: string; kind: string }[];
+    edges: { from: string; to: string }[];
+    boundaryEdges: unknown[];
+    omissions: { what: string; why: string; count?: number }[];
+  },
+>(page: T, budget = MAP_PAGE_TOKENS): T {
+  const drop = (what: string, why: string) => {
+    const existing = page.omissions.find((o) => o.what === what);
+    if (existing) existing.count = (existing.count ?? 0) + 1;
+    else page.omissions.push({ what, why, count: 1 });
+  };
+  const symbolIndex = () => page.nodes.findLastIndex((n) => n.kind !== "file");
+  while (tokens(JSON.stringify(page)) > budget) {
+    const at = symbolIndex();
+    if (at >= 0) {
+      const [removed] = page.nodes.splice(at, 1);
+      page.edges = page.edges.filter(
+        (e) => e.from !== removed.id && e.to !== removed.id,
+      );
+      drop(
+        "declarations on this page",
+        `Map pages are capped at ${budget} estimated tokens; use find_component or the component detail for a specific declaration`,
+      );
+      continue;
+    }
+    if (page.boundaryEdges.length) {
+      page.boundaryEdges.pop();
+      drop(
+        "listed boundary relationships",
+        `Map pages are capped at ${budget} estimated tokens; boundaryEdgeCount still reports the true total`,
+      );
+      continue;
+    }
+    break;
+  }
+  return page;
+}
 export const editSchema = z.object({
   path: z.string().min(1).max(400),
   content: z.string().max(256000).nullable(),
@@ -184,14 +232,106 @@ export class Service<S extends Storage = Store> {
       )
       .map((r) => this.summary(r));
   }
-  async map(p: Principal, id: string) {
+  /**
+   * Compact orientation record. Bounded to BRIEF_BUDGET estimated tokens
+   * regardless of repository size; it carries no source and no raw graph.
+   */
+  async brief(p: Principal, id: string) {
     const r = await this.repo(p, id);
-    return {
+    return brief(r.graph, {
+      id: r.id,
+      name: r.name,
+      branch: r.branch,
+      status: r.status,
+    });
+  }
+  /**
+   * One page of at most 50 files. Relationships whose other end is off this
+   * page are reported separately in `boundaryEdges` (capped) with a total
+   * count, so paging never silently drops a relationship.
+   */
+  async mapPage(p: Principal, id: string, after = "", query = "") {
+    const r = await this.repo(p, id);
+    const q = query.toLowerCase();
+    const matching = r.graph.nodes
+      .filter(
+        (n) =>
+          n.kind === "file" &&
+          n.path > after &&
+          (!q || n.path.toLowerCase().includes(q)),
+      )
+      .sort((a, b) => a.path.localeCompare(b.path));
+    const page = matching.slice(0, MAP_PAGE_FILES);
+    const paths = new Set(page.map((n) => n.path));
+    const nodes = r.graph.nodes.filter(
+      (n) => n.kind === "file" && paths.has(n.path),
+    );
+    let symbolOverflow = 0;
+    for (const n of r.graph.nodes)
+      if (n.kind !== "file" && paths.has(n.path)) {
+        if (nodes.length < MAP_PAGE_NODES) nodes.push(n);
+        else symbolOverflow++;
+      }
+    const ids = new Set(nodes.map((n) => n.id));
+    const edges = r.graph.edges.filter((e) => ids.has(e.from) && ids.has(e.to));
+    const crossing = r.graph.edges.filter(
+      (e) => e.kind !== "contains" && paths.has(e.from) !== paths.has(e.to),
+    );
+    const omissions = [
+      ...(matching.length > page.length
+        ? [
+            {
+              what: "files",
+              why: "Map pages carry at most 50 files; continue with nextCursor or a path query",
+              count: matching.length - page.length,
+            },
+          ]
+        : []),
+      ...(symbolOverflow
+        ? [
+            {
+              what: "symbols on this page",
+              why: `Page node cap of ${MAP_PAGE_NODES}; use find_component for a specific declaration`,
+              count: symbolOverflow,
+            },
+          ]
+        : []),
+      ...(crossing.length > MAP_PAGE_BOUNDARY_EDGES
+        ? [
+            {
+              what: "boundary relationships",
+              why: `At most ${MAP_PAGE_BOUNDARY_EDGES} cross-page relationships are listed`,
+              count: crossing.length - MAP_PAGE_BOUNDARY_EDGES,
+            },
+          ]
+        : []),
+    ];
+    return fitPage({
       ...this.summary(r),
-      nodes: r.graph.nodes,
-      edges: r.graph.edges,
-      warnings: r.graph.warnings,
-    };
+      nodes,
+      edges,
+      boundaryEdges: crossing.slice(0, MAP_PAGE_BOUNDARY_EDGES).map((e) => ({
+        from: e.from,
+        to: e.to,
+        kind: e.kind,
+        evidence: e.evidence,
+        confidence: e.confidence,
+        offPage: paths.has(e.from) ? e.to : e.from,
+      })),
+      boundaryEdgeCount: crossing.length,
+      warnings: [
+        ...r.graph.warnings.slice(0, 20),
+        `Showing ${page.length} of ${r.graph.files.length} indexed files. ${crossing.length} relationships cross this page boundary and are listed in boundaryEdges (first ${Math.min(crossing.length, MAP_PAGE_BOUNDARY_EDGES)}).`,
+      ],
+      nextCursor:
+        matching.length > page.length ? (page.at(-1)?.path ?? null) : null,
+      visibleFiles: page.length,
+      omissions,
+    });
+  }
+  /** Bounded by construction: the first page of the paged map. */
+  async map(p: Principal, id: string) {
+    return this.mapPage(p, id);
   }
   // Whole-repository view for the visual galaxy. Deliberately lightweight:
   // one entry per file plus index-encoded edges, so the browser can hold every
@@ -280,16 +420,46 @@ export class Service<S extends Storage = Store> {
         .map((e) => link(e, e.to)),
     };
   }
+  /**
+   * Hard ceiling on everything one task may ingest, in estimated tokens:
+   * four times the context budget, capped. Reads are refused once it is spent,
+   * so "read the whole repository" is impossible by construction, not by
+   * politeness.
+   */
+  pullBudget(t: Task) {
+    return t.pullBudget ?? Math.min(48000, (t.context?.budget ?? 6000) * 4);
+  }
+  ledger(t: Task) {
+    const pullBudget = this.pullBudget(t),
+      spent = t.spent ?? 0;
+    return {
+      id: t.id,
+      pullBudget,
+      spent,
+      remaining: Math.max(0, pullBudget - spent),
+    };
+  }
+  /** Record what a task tool actually delivered. Estimated tokens, not billing. */
+  async spend(p: Principal, taskId: string, amount: number) {
+    const t = await this.store.get<Task>(p.tenant, "task", taskId);
+    t.pullBudget = this.pullBudget(t);
+    t.spent = (t.spent ?? 0) + Math.max(0, amount);
+    await this.store.put(p.tenant, "task", t);
+    return this.ledger(t);
+  }
   async begin(p: Principal, repoId: string, prompt: string, budget: number) {
     this.allowed(p, "write");
     const r = await this.repo(p, repoId);
+    const selected = context(r.graph, prompt, budget);
     const task: Task = {
       id: randomUUID(),
       repoId,
       prompt,
       base: r.graph.revision,
-      context: context(r.graph, prompt, budget),
+      context: selected,
       createdAt: new Date().toISOString(),
+      pullBudget: Math.min(48000, budget * 4),
+      spent: selected.estimatedTokens,
     };
     await this.store.put(p.tenant, "task", task);
     await this.store.audit(
