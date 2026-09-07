@@ -368,6 +368,13 @@ async function route(req: Request, env: Env): Promise<Response> {
     }
     if (path.startsWith("/api/galaxy/") && req.method === "GET")
       return reply(await s.galaxy(p, decodeURIComponent(path.slice(12))));
+    if (path.startsWith("/api/component/") && req.method === "GET") {
+      const target = url.searchParams.get("path");
+      assert(target, "Provide a file path");
+      return reply(
+        await s.component(p, decodeURIComponent(path.slice(15)), target),
+      );
+    }
     if (path.startsWith("/api/history/") && req.method === "GET") {
       const repoId = decodeURIComponent(path.slice(13));
       await s.repo(p, repoId);

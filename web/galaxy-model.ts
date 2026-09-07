@@ -41,6 +41,7 @@ export type Body = {
   z: number;
   radius: number;
   color: string;
+  depth: number; // 0 at the galactic core, 1 at the rim
   bytes: number;
 };
 export type Filters = {
@@ -48,6 +49,8 @@ export type Filters = {
   categories: Category[]; // empty = every category
   minIncoming: number;
   edgeKinds: string[]; // empty = every kind
+  links: "all" | "selected" | "none"; // how much of the relationship web to draw
+  minConfidence: number; // 0-1, drops low-evidence relationships
   focus: string; // path of the focused file, "" = whole galaxy
   depth: number; // hops from the focus that stay visible
   colorMode: "region" | "category" | "importance";
@@ -57,6 +60,8 @@ export const defaultFilters: Filters = {
   categories: [],
   minIncoming: 0,
   edgeKinds: [],
+  links: "all",
+  minConfidence: 0,
   focus: "",
   depth: 2,
   colorMode: "region",
@@ -69,18 +74,22 @@ export const classLabels: Record<BodyClass, string> = {
 };
 // Warm gold through cool blue: the two halves of the Caelogram mark.
 export const regionPalette = [
-  "#e8c98d",
-  "#7fb4ee",
-  "#d8b07c",
-  "#a8c9e8",
-  "#c8a06f",
-  "#8fd0e0",
-  "#efe0b8",
-  "#6f9fd8",
-  "#bfa88c",
-  "#a6bcd2",
-  "#d9c4a0",
-  "#87a6c4",
+  "#f0c977",
+  "#6fa8f0",
+  "#e08a6a",
+  "#66c9c2",
+  "#c98ae0",
+  "#e8d79a",
+  "#8f9ff0",
+  "#e0705f",
+  "#7fd08a",
+  "#d47fa8",
+  "#b6a0f0",
+  "#e6a94f",
+  "#5fc0e8",
+  "#c7d47f",
+  "#f08fb8",
+  "#9fb8d4",
 ];
 export const categoryColors: Record<Category, string> = {
   code: "#e8c98d",
@@ -140,15 +149,25 @@ export type Galaxy = {
   extent: number;
   cuts: { star: number; planet: number };
   maxIncoming: number;
+  total: number; // files in the repository, before filtering
 };
-// One pass over the payload produces every derived property the renderer and
-// the filter panel need. Expensive enough to memoise on the payload identity.
-export function buildGalaxy(data: GalaxyPayload): Galaxy {
+// Builds the galaxy for whatever the filters leave visible.
+//
+// Two things are deliberately separated. A file's *nature* — debris, moon,
+// planet, star — comes from its relationships across the whole repository, so
+// looking away from part of the code never demotes a hub. Its *position* is
+// ranked among the files currently on screen, so a filtered view spreads across
+// the whole disk and the survivors stay meaningful relative to one another
+// rather than leaving a half-empty ring behind.
+export function buildGalaxy(
+  data: GalaxyPayload,
+  filters: Filters = defaultFilters,
+): Galaxy {
   const n = data.nodes.length;
   const incoming = new Array<number>(n).fill(0),
     outgoing = new Array<number>(n).fill(0);
   const adjacency = new Map<number, number[]>();
-  const edges = data.edges.map(([from, to, k]) => {
+  const allEdges = data.edges.map(([from, to, k]) => {
     incoming[to]++;
     outgoing[from]++;
     for (const [a, b] of [
@@ -162,7 +181,8 @@ export function buildGalaxy(data: GalaxyPayload): Galaxy {
     return { from, to, kind: data.kinds[k] ?? "imports" };
   });
   // Thresholds adapt to the repository: a small project still gets a star, a
-  // mature one does not turn every shared util into one.
+  // mature one does not turn every shared util into one. Computed over every
+  // file so they hold steady as the view narrows.
   const sorted = [...incoming].sort((a, b) => b - a);
   const quantile = (f: number) =>
     sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * f))] ?? 0;
@@ -172,10 +192,16 @@ export function buildGalaxy(data: GalaxyPayload): Galaxy {
     2,
     Math.min(starCut - 1 || 1, Math.max(2, quantile(0.07))),
   );
+  // Region and category lists describe the whole repository, so the filter
+  // chips never vanish just because they are switched off.
   const regionCounts = new Map<string, number>();
-  for (const node of data.nodes) {
-    const r = regionOf(node.path);
+  const categoryCounts = new Map<Category, number>();
+  const categoryOf = new Array<Category>(n);
+  for (let i = 0; i < n; i++) {
+    const r = regionOf(data.nodes[i].path);
     regionCounts.set(r, (regionCounts.get(r) ?? 0) + 1);
+    const c = (categoryOf[i] = categorize(data.nodes[i].path));
+    categoryCounts.set(c, (categoryCounts.get(c) ?? 0) + 1);
   }
   const regions = [...regionCounts.entries()]
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
@@ -185,32 +211,73 @@ export function buildGalaxy(data: GalaxyPayload): Galaxy {
       color: regionPalette[i % regionPalette.length],
     }));
   const regionIndex = new Map(regions.map((r, i) => [r.name, i] as const));
-  // Spiral geometry. Arms come from the largest subsystems; smaller ones share
-  // an arm at a phase offset so the disk stays readable rather than crowded.
-  const arms = Math.min(6, Math.max(2, Math.min(regions.length, 5)));
-  const extent = 16 + Math.sqrt(n) * 1.5;
+  // --- membership -------------------------------------------------------
+  const wanted = new Set(filters.regions),
+    wantedCategories = new Set(filters.categories);
+  let near: Set<number> | undefined;
+  if (filters.focus) {
+    const start = data.nodes.findIndex((x) => x.path === filters.focus);
+    if (start >= 0) {
+      near = new Set([start]);
+      let frontier = [start];
+      for (let d = 0; d < filters.depth; d++) {
+        const next: number[] = [];
+        for (const i of frontier)
+          for (const j of adjacency.get(i) ?? [])
+            if (!near.has(j)) {
+              near.add(j);
+              next.push(j);
+            }
+        frontier = next;
+      }
+    }
+  }
+  const members: number[] = [];
+  for (let i = 0; i < n; i++)
+    if (
+      (!wanted.size || wanted.has(regionOf(data.nodes[i].path))) &&
+      (!wantedCategories.size || wantedCategories.has(categoryOf[i])) &&
+      incoming[i] >= filters.minIncoming &&
+      (!near || near.has(i))
+    )
+      members.push(i);
+  const slot = new Map(members.map((i, position) => [i, position] as const));
+  // --- spiral geometry over the visible set ------------------------------
+  const visibleRegions = [
+    ...new Set(members.map((i) => regionOf(data.nodes[i].path))),
+  ].sort((a, b) => (regionIndex.get(a) ?? 0) - (regionIndex.get(b) ?? 0));
+  const armOf = new Map(visibleRegions.map((r, i) => [r, i] as const));
+  // A spiral needs at least two arms to fill the disk. With one subsystem on
+  // screen its files are split across both, so filtering down to a single
+  // region still yields a whole galaxy rather than a half-empty arc.
+  const armsPerRegion = visibleRegions.length === 1 ? 2 : 1;
+  const arms = Math.min(
+    6,
+    Math.max(2, Math.min(visibleRegions.length * armsPerRegion, 5)),
+  );
+  const extent = 16 + Math.sqrt(Math.max(1, members.length)) * 1.5;
   const TWIST = 6.4;
   const importanceOf = (i: number) => incoming[i] * 1 + outgoing[i] * 0.28;
   // Radius comes from *rank*, not from the raw score. Import counts are heavily
   // skewed, so a proportional radius would pin almost every file to the rim;
-  // ranking spreads the disk evenly with the hubs still holding the core.
-  const rank = new Float64Array(n);
-  const ordered = data.nodes
-    .map((node, i) => i)
+  // ranking spreads the disk evenly with the hubs still holding the core. The
+  // ranking runs over the visible files, which is what re-arranges the galaxy
+  // when a filter changes.
+  const rank = new Map<number, number>();
+  [...members]
     .sort(
       (a, b) =>
         importanceOf(b) - importanceOf(a) ||
         hash(data.nodes[a].path) - hash(data.nodes[b].path),
+    )
+    .forEach((i, position) =>
+      rank.set(i, members.length > 1 ? position / (members.length - 1) : 0),
     );
-  ordered.forEach((i, position) => {
-    rank[i] = n > 1 ? position / (n - 1) : 0;
-  });
-  const categoryCounts = new Map<Category, number>();
-  const bodies: Body[] = data.nodes.map((node, i) => {
+  const bodies: Body[] = members.map((i, position) => {
+    const node = data.nodes[i];
     const region = regionOf(node.path),
       ri = regionIndex.get(region) ?? 0;
-    const category = categorize(node.path);
-    categoryCounts.set(category, (categoryCounts.get(category) ?? 0) + 1);
+    const category = categoryOf[i];
     const importance = importanceOf(i);
     const bodyClass: BodyClass =
       incoming[i] >= starCut
@@ -224,11 +291,13 @@ export function buildGalaxy(data: GalaxyPayload): Galaxy {
     // t = 0 at the galactic core (most connected), 1 at the rim. The fractional
     // power keeps areal density roughly even while still opening out the core
     // enough that the handful of stars there do not collide.
-    const t = rank[i];
+    const t = rank.get(i) ?? 0;
     const jitter = rng();
     const r = extent * Math.pow(t, 0.42) * (0.86 + jitter * 0.26) + 0.9;
-    const arm = ri % arms;
-    const sharedPhase = Math.floor(ri / arms) * 0.55;
+    const base = armOf.get(region) ?? 0;
+    const arm =
+      (base * armsPerRegion + (hash(node.path) % armsPerRegion)) % arms;
+    const sharedPhase = Math.floor(base / arms) * 0.55;
     const spread = (rng() - 0.5) * (0.2 + (r / extent) * 0.34);
     const theta =
       (arm / arms) * Math.PI * 2 +
@@ -247,7 +316,7 @@ export function buildGalaxy(data: GalaxyPayload): Galaxy {
             ? 0.27 + Math.log2(incoming[i] + outgoing[i] + 1) * 0.05
             : 0.13;
     return {
-      index: i,
+      index: position,
       path: node.path,
       name: node.name,
       region,
@@ -262,14 +331,37 @@ export function buildGalaxy(data: GalaxyPayload): Galaxy {
       z: Math.sin(theta) * r,
       radius,
       color: regions[ri]?.color ?? regionPalette[0],
+      depth: t,
       bytes: node.bytes,
     };
   });
+  // Relationships among the survivors, honouring the link filters.
+  const wantedKinds = new Set(filters.edgeKinds);
+  const edges =
+    filters.links === "none"
+      ? []
+      : allEdges.flatMap((e) => {
+          const from = slot.get(e.from),
+            to = slot.get(e.to);
+          if (from === undefined || to === undefined) return [];
+          if (wantedKinds.size && !wantedKinds.has(e.kind)) return [];
+          return [{ from, to, kind: e.kind }];
+        });
+  const visibleAdjacency = new Map<number, number[]>();
+  for (const e of edges)
+    for (const [a, b] of [
+      [e.from, e.to],
+      [e.to, e.from],
+    ]) {
+      const list = visibleAdjacency.get(a);
+      if (list) list.push(b);
+      else visibleAdjacency.set(a, [b]);
+    }
   return {
     bodies,
     byPath: new Map(bodies.map((b) => [b.path, b] as const)),
     edges,
-    adjacency,
+    adjacency: visibleAdjacency,
     regions,
     categories: [...categoryCounts.entries()]
       .sort((a, b) => b[1] - a[1])
@@ -278,6 +370,7 @@ export function buildGalaxy(data: GalaxyPayload): Galaxy {
     extent,
     cuts: { star: starCut, planet: planetCut },
     maxIncoming,
+    total: n,
   };
 }
 export function colorFor(
@@ -298,64 +391,49 @@ export function colorFor(
     const p = t * (c.length - 1),
       i = Math.min(c.length - 2, Math.floor(p)),
       f = p - i;
-    const mix = c[i].map((v, k) => v + (c[i + 1][k] - v) * f);
-    return `#${mix
-      .map((v) =>
-        Math.round(v * 255)
-          .toString(16)
-          .padStart(2, "0"),
-      )
-      .join("")}`;
+    return rgb(c[i].map((v, k) => v + (c[i + 1][k] - v) * f));
   }
-  return body.color;
+  // Subsystem hue, warmed toward the core and cooled toward the rim so the disk
+  // carries a Milky Way gradient without losing which subsystem a body is in.
+  return rgb(shift(body.color, body.depth));
 }
-// Which bodies survive the current filters, and — separately — which are merely
-// dimmed. Focus mode keeps the neighbourhood bright and everything else faint.
-export function applyFilters(
+const CORE = [1.0, 0.83, 0.55],
+  RIM = [0.62, 0.76, 1.0];
+// Blends a subsystem colour toward the warm core or the cool rim.
+export function shift(hex: string, depth: number, strength = 0.34) {
+  const base = [
+    parseInt(hex.slice(1, 3), 16) / 255,
+    parseInt(hex.slice(3, 5), 16) / 255,
+    parseInt(hex.slice(5, 7), 16) / 255,
+  ];
+  const target = depth < 0.5 ? CORE : RIM;
+  const weight = Math.abs(depth - 0.5) * 2 * strength;
+  return base.map((v, i) => v + (target[i] - v) * weight);
+}
+const rgb = (c: number[]) =>
+  `#${c
+    .map((v) =>
+      Math.round(Math.max(0, Math.min(1, v)) * 255)
+        .toString(16)
+        .padStart(2, "0"),
+    )
+    .join("")}`;
+// Search and task relevance never remove a body, they only dim the rest.
+export function applyEmphasis(
   galaxy: Galaxy,
-  filters: Filters,
   search: string,
   relevant: string[],
-): { visible: Uint8Array; emphasis: Float32Array } {
-  const n = galaxy.bodies.length;
-  const visible = new Uint8Array(n);
-  const emphasis = new Float32Array(n).fill(1);
-  const regions = new Set(filters.regions),
-    categories = new Set(filters.categories);
+): Float32Array {
+  const emphasis = new Float32Array(galaxy.bodies.length).fill(1);
   const query = search.trim().toLowerCase();
   const relevantSet = new Set(relevant);
-  let near: Set<number> | undefined;
-  if (filters.focus) {
-    const start = galaxy.byPath.get(filters.focus);
-    if (start) {
-      near = new Set([start.index]);
-      let frontier = [start.index];
-      for (let d = 0; d < filters.depth; d++) {
-        const next: number[] = [];
-        for (const i of frontier)
-          for (const j of galaxy.adjacency.get(i) ?? [])
-            if (!near.has(j)) {
-              near.add(j);
-              next.push(j);
-            }
-        frontier = next;
-      }
-    }
-  }
-  for (let i = 0; i < n; i++) {
-    const b = galaxy.bodies[i];
-    const passes =
-      (!regions.size || regions.has(b.region)) &&
-      (!categories.size || categories.has(b.category)) &&
-      b.incoming >= filters.minIncoming &&
-      (!near || near.has(i));
-    visible[i] = passes ? 1 : 0;
-    if (!passes) continue;
+  if (!query && !relevantSet.size) return emphasis;
+  for (const b of galaxy.bodies) {
     const matching = !query || b.path.toLowerCase().includes(query);
     const related = !relevantSet.size || relevantSet.has(b.path);
-    emphasis[i] = matching && related ? 1 : 0.28;
+    emphasis[b.index] = matching && related ? 1 : 0.28;
   }
-  return { visible, emphasis };
+  return emphasis;
 }
 // The sample repository and any locally paged map already carry full nodes and
 // edges; reshape them into the same payload the galaxy endpoint returns.

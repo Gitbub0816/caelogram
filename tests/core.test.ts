@@ -409,3 +409,22 @@ test("whole-repository galaxy carries every file and index-encoded relationships
   assert.equal(galaxy.truncated, false);
   assert.equal(galaxy.revision, paged.revision);
 });
+test("component detail resolves one file's declarations and both link directions", async () => {
+  const { service, repo } = await setup();
+  const detail = await service.component(p, repo.id, "src/payments.ts");
+  assert.equal(detail.path, "src/payments.ts");
+  assert.equal(detail.name, "payments.ts");
+  assert(detail.symbols.some((s) => s.name === "charge"));
+  assert(detail.symbols.every((s) => s.kind !== "file"));
+  assert(
+    detail.incoming.some(
+      (l) => l.path === "src/checkout.ts" && l.kind === "imports",
+    ),
+  );
+  assert(detail.incoming.some((l) => l.kind === "tests"));
+  assert(detail.incoming.every((l) => l.kind !== "contains"));
+  assert.equal(detail.outgoing.length, 0);
+  await assert.rejects(() => service.component(p, repo.id, "src/absent.ts"), {
+    status: 404,
+  });
+});

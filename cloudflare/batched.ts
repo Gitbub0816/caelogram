@@ -1,4 +1,8 @@
-import { Service, type GalaxyData } from "../src/service.js";
+import {
+  Service,
+  type ComponentDetail,
+  type GalaxyData,
+} from "../src/service.js";
 import { GitHub } from "../src/github.js";
 import { CloudStore } from "./store.js";
 import { assert, digest, Fault, redact } from "../src/security.js";
@@ -13,7 +17,8 @@ import type {
 import type { Env } from "./worker.js";
 import { availableRepositories } from "./onboarding.js";
 const GALAXY_NODE_LIMIT = 20000,
-  GALAXY_EDGE_LIMIT = 60000;
+  GALAXY_EDGE_LIMIT = 60000,
+  COMPONENT_EDGE_LIMIT = 400;
 import { posix } from "node:path";
 import {
   ANALYZER_VERSION,
@@ -519,6 +524,78 @@ export class BatchedService extends Service<CloudStore> {
       edges,
       kinds,
       truncated,
+    };
+  }
+  // Per-file inspector detail, read straight from the one row that holds it
+  // rather than from a map page the file may not be on.
+  async component(
+    p: Principal,
+    id: string,
+    path: string,
+  ): Promise<ComponentDetail> {
+    const record = await this.q(
+      "SELECT id FROM index_repos WHERE tenant=? AND id=?",
+      p.tenant,
+      id,
+    ).first();
+    if (!record) return super.component(p, id, path);
+    const j = await this.current(p, id);
+    const row = await this.q(
+      "SELECT path,bytes,metadata FROM index_files WHERE tenant=? AND job=? AND path=?",
+      p.tenant,
+      j.id,
+      path,
+    ).first<{ path: string; bytes: number; metadata: string | null }>();
+    assert(row, "File not indexed at this revision", 404);
+    const meta = row.metadata ? JSON.parse(row.metadata) : {};
+    const nodes: any[] = meta.nodes ?? [];
+    const file = nodes.find((n) => n.kind === "file");
+    const links = await this.q(
+      "SELECT src,dst,kind,evidence,confidence FROM index_edges WHERE tenant=? AND job=? AND (src=? OR dst=?) LIMIT ?",
+      p.tenant,
+      j.id,
+      path,
+      path,
+      COMPONENT_EDGE_LIMIT,
+    ).all<{
+      src: string;
+      dst: string;
+      kind: string;
+      evidence: string;
+      confidence: number | null;
+    }>();
+    const link = (e: (typeof links.results)[number], other: string) => ({
+      path: other,
+      kind: e.kind,
+      evidence: e.evidence,
+      confidence: e.confidence ?? 1,
+    });
+    return {
+      path: row.path,
+      name: row.path.slice(row.path.lastIndexOf("/") + 1),
+      kind: "file",
+      subsystem: file?.subsystem ?? posix.dirname(row.path),
+      start: file?.start ?? 1,
+      end: file?.end ?? 1,
+      bytes: row.bytes,
+      analysis: file?.analysis,
+      exclusionReason: file?.exclusionReason,
+      symbols: nodes
+        .filter((n) => n.kind !== "file")
+        .slice(0, 200)
+        .map((n) => ({
+          id: n.id,
+          name: n.name,
+          kind: n.kind,
+          start: n.start,
+          end: n.end,
+        })),
+      incoming: links.results
+        .filter((e) => e.dst === path && e.kind !== "contains")
+        .map((e) => link(e, e.src)),
+      outgoing: links.results
+        .filter((e) => e.src === path && e.kind !== "contains")
+        .map((e) => link(e, e.dst)),
     };
   }
   async boundedGraph(

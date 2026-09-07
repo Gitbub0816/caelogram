@@ -6,6 +6,11 @@ import AgentAccess from "./AgentAccess";
 import { Galaxy, colors, type MapData } from "./Galaxy";
 const RepoGalaxy = lazy(() => import("./RepoGalaxy"));
 import {
+  ComponentInspector,
+  detailFromMapData,
+  type ComponentDetail,
+} from "./component-detail";
+import {
   defaultFilters,
   payloadFromMapData,
   type Filters,
@@ -78,6 +83,8 @@ export default function App({
     [galaxy, setGalaxy] = useState<GalaxyModel | null>(null),
     [filters, setFilters] = useState<Filters>(defaultFilters),
     [inspectorOpen, setInspectorOpen] = useState(true),
+    [detail, setDetail] = useState<ComponentDetail | null>(null),
+    [detailError, setDetailError] = useState(""),
     [history, setHistory] = useState<{ tasks: any[]; changes: Change[] }>({
       tasks: [],
       changes: [],
@@ -187,18 +194,36 @@ export default function App({
       setTask(t);
       setView("context");
     });
-  const node = data?.nodes.find((n) => n.id === selected);
-  // A file can be selected in the galaxy while sitting outside the current map
-  // page, so the inspector falls back to what the galaxy itself knows.
+  // The galaxy holds every file, but only a page of the map carries
+  // declarations and relationships, so the inspector resolves the rest itself.
+  useEffect(() => {
+    if (!data || !selected) {
+      setDetail(null);
+      return;
+    }
+    let cancelled = false;
+    setDetailError("");
+    const local = detailFromMapData(data, selected);
+    setDetail(local);
+    if (local && demo) return;
+    void (async () => {
+      try {
+        const next = await request(
+          `/api/component/${encodeURIComponent(data.id)}?path=${encodeURIComponent(selected)}`,
+        );
+        if (!cancelled) setDetail(next);
+      } catch (e) {
+        if (cancelled || local) return;
+        setDetailError(e instanceof Error ? e.message : "Detail unavailable");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [data?.id, data?.revision, selected, demo]);
   const body = selected ? galaxy?.byPath.get(selected) : undefined;
-  const incoming =
-    data?.edges.filter((e) => e.to === selected && e.kind !== "contains") ?? [];
-  const outgoing =
-    data?.edges.filter((e) => e.from === selected && e.kind !== "contains") ??
-    [];
-  const symbols =
-    data?.nodes.filter((n) => n.path === node?.path && n.kind !== "file") ?? [];
-  const selectedItem = task?.context.items.find((i) => i.path === node?.path);
+  // File nodes are keyed by path, so the selection is the path.
+  const selectedItem = task?.context.items.find((i) => i.path === selected);
   const nav = [
     ["map", "◉", "Repository map"],
     ["context", "⌘", "Task context"],
@@ -984,57 +1009,65 @@ export default function App({
                 </div>
               </div>
               <div className="map-workspace">
-                {!demo && data.visibleFiles !== undefined && (
-                  <div className="notice">
-                    <p>
-                      Showing {data.visibleFiles} of {data.files} indexed files.
-                      Connections to other pages are outside this view.
-                    </p>
-                    <button
-                      onClick={() =>
-                        void act("Searching map", async () =>
-                          setData(
-                            await tool("map_page", {
-                              repoId: data.id,
-                              query: search,
-                            }),
-                          ),
-                        )
-                      }
-                    >
-                      Search all indexed paths
-                    </button>
-                    {data.nextCursor && (
+                {!demo &&
+                  data.visibleFiles !== undefined &&
+                  !(
+                    mapMode === "orbit" &&
+                    galaxyData &&
+                    !galaxyData.truncated
+                  ) && (
+                    <div className="notice">
+                      <p>
+                        Showing {data.visibleFiles} of {data.files} indexed
+                        files. Connections to other pages are outside this view.
+                      </p>
                       <button
                         onClick={() =>
-                          void act("Loading map page", async () => {
+                          void act("Searching map", async () =>
                             setData(
                               await tool("map_page", {
                                 repoId: data.id,
-                                after: data.nextCursor,
                                 query: search,
                               }),
+                            ),
+                          )
+                        }
+                      >
+                        Search all indexed paths
+                      </button>
+                      {data.nextCursor && (
+                        <button
+                          onClick={() =>
+                            void act("Loading map page", async () => {
+                              setData(
+                                await tool("map_page", {
+                                  repoId: data.id,
+                                  after: data.nextCursor,
+                                  query: search,
+                                }),
+                              );
+                              setSelected("");
+                            })
+                          }
+                        >
+                          Next files
+                        </button>
+                      )}
+                      <button
+                        onClick={() =>
+                          void act("Loading map", async () => {
+                            setData(
+                              await tool("map_page", { repoId: data.id }),
                             );
+                            setSearch("");
                             setSelected("");
                           })
                         }
                       >
-                        Next files
+                        First files
                       </button>
-                    )}
-                    <button
-                      onClick={() =>
-                        void act("Loading map", async () => {
-                          setData(await tool("map_page", { repoId: data.id }));
-                          setSearch("");
-                          setSelected("");
-                        })
-                      }
-                    >
-                      First files
-                    </button>
-                  </div>
-                )}
+                    </div>
+                  )}
                 <section className="map-panel">
                   <div className="map-toolbar">
                     <div className="segmented" aria-label="Map view">
@@ -1177,211 +1210,54 @@ export default function App({
                       {inspectorOpen ? "→" : "←"}
                     </button>
                   </div>
-                  {node ? (
-                    <>
-                      <div className="component-emblem">
-                        <img src="/mark.png" alt="" />
-                      </div>
-                      <h2>{node.name}</h2>
-                      <p className="path">{node.path}</p>
-                      <span className="pill">{node.kind}</span>
-                      {node.analysis && <p>Analysis: {node.analysis}</p>}
-                      {node.exclusionReason && (
-                        <p role="note">{node.exclusionReason}</p>
-                      )}
-                      {selectedItem && (
-                        <span className="pill gold">
-                          {selectedItem.required
-                            ? "Starting component"
-                            : "Related context"}
-                        </span>
-                      )}
-                      <dl>
-                        <div>
-                          <dt>Subsystem</dt>
-                          <dd>{node.subsystem}</dd>
-                        </div>
-                        <div>
-                          <dt>Incoming links</dt>
-                          <dd>{incoming.length}</dd>
-                        </div>
-                        <div>
-                          <dt>Dependencies</dt>
-                          <dd>{outgoing.length}</dd>
-                        </div>
-                        <div>
-                          <dt>Declarations</dt>
-                          <dd>{symbols.length}</dd>
-                        </div>
-                        <div>
-                          <dt>Test coverage</dt>
-                          <dd>Unknown</dd>
-                        </div>
-                        <div>
-                          <dt>Classification</dt>
-                          <dd>
-                            {incoming.length
-                              ? "Connected"
-                              : "Unable to determine"}
-                          </dd>
-                        </div>
-                      </dl>
-                      <div className="inspector-section">
-                        <h3>Why it looks this way</h3>
-                        <p>
-                          Radius reflects {incoming.length} incoming module
-                          links. Color identifies its subsystem. Orbits appear
-                          when a file has multiple consumers.
-                        </p>
-                      </div>
-                      {selectedItem && (
-                        <div className="inspector-section relevance">
-                          <h3>Included in your task</h3>
-                          <p>{selectedItem.reason}</p>
-                        </div>
-                      )}
-                      <div className="inspector-section">
-                        <h3>
-                          Connected components{" "}
-                          <span>{incoming.length + outgoing.length}</span>
-                        </h3>
-                        {[...incoming, ...outgoing].slice(0, 8).map((e, i) => (
-                          <button
-                            className="relation"
-                            key={i}
-                            onClick={() => {
-                              setSelected(e.from === node.id ? e.to : e.from);
-                              setSource("");
-                            }}
-                          >
-                            <span>{e.kind === "tests" ? "┄" : "↗"}</span>
-                            <div>
-                              {(e.from === node.id ? e.to : e.from)
-                                .split("/")
-                                .pop()}
-                              <small>
-                                {e.kind} · {Math.round(e.confidence * 100)}%
-                                evidence confidence
-                              </small>
-                            </div>
-                          </button>
-                        ))}
-                        {!incoming.length && !outgoing.length && (
-                          <p>
-                            No resolved static module links. This does not
-                            establish that the file is unused.
-                          </p>
-                        )}
-                      </div>
-                      {symbols.length > 0 && (
-                        <div className="inspector-section">
-                          <h3>Declarations</h3>
-                          {symbols.slice(0, 12).map((s) => (
-                            <div className="symbol" key={s.id}>
-                              <span>{s.name}</span>
-                              <small>
-                                {s.kind} · L{s.start}–{s.end}
-                              </small>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      {selectedItem ? (
-                        <details>
-                          <summary>Inspect selected source</summary>
-                          <pre>{selectedItem.content}</pre>
-                        </details>
-                      ) : (
-                        !demo &&
-                        task && (
-                          <button
-                            className="secondary"
-                            onClick={() =>
-                              void act("Reading bounded section", async () => {
-                                const r = await tool("read_section", {
-                                  taskId: task.id,
-                                  path: node.path,
-                                  start: 1,
-                                  end: Math.min(node.end, 100),
-                                  reason:
-                                    "Inspect selected component to assess task impact",
-                                });
-                                setSource(r.content);
-                              })
-                            }
-                          >
-                            Read first 100 lines
-                          </button>
-                        )
-                      )}
-                      {source && <pre>{source}</pre>}
-                      <div className="evidence-note">
-                        STATIC EVIDENCE
-                        <span>
-                          Valid at {data.revision.slice(0, 8)}. Import
-                          resolution does not establish runtime reachability.
-                        </span>
-                      </div>
-                    </>
-                  ) : body ? (
-                    <>
-                      <div className="component-emblem">
-                        <img src="/mark.png" alt="" />
-                      </div>
-                      <h2>{body.name}</h2>
-                      <p className="path">{body.path}</p>
-                      <span className="pill">{body.bodyClass}</span>
-                      <dl>
-                        <div>
-                          <dt>Subsystem</dt>
-                          <dd>{body.directory}</dd>
-                        </div>
-                        <div>
-                          <dt>Incoming links</dt>
-                          <dd>{body.incoming}</dd>
-                        </div>
-                        <div>
-                          <dt>Dependencies</dt>
-                          <dd>{body.outgoing}</dd>
-                        </div>
-                        <div>
-                          <dt>File type</dt>
-                          <dd>{body.category}</dd>
-                        </div>
-                      </dl>
-                      <div className="inspector-section">
-                        <h3>Why it looks this way</h3>
-                        <p>
-                          {body.incoming} files import this one, so the galaxy
-                          renders it as a {body.bodyClass} and places it{" "}
-                          {body.incoming >= (galaxy?.cuts.planet ?? 2)
-                            ? "near the core"
-                            : "out toward the rim"}
-                          .
-                        </p>
-                      </div>
-                      <button
-                        className="secondary full"
-                        onClick={() =>
-                          setFilters({ ...filters, focus: body.path })
-                        }
-                      >
-                        Focus on its neighbourhood
-                      </button>
-                      <div className="evidence-note">
-                        STATIC EVIDENCE
-                        <span>
-                          Valid at {data.revision.slice(0, 8)}. This file is
-                          outside the loaded map page, so declarations are not
-                          shown.
-                        </span>
-                      </div>
-                    </>
-                  ) : (
-                    <div className="empty">
-                      <p>Select a file to inspect its relationships.</p>
-                    </div>
-                  )}
+                  <ComponentInspector
+                    detail={detail}
+                    body={body}
+                    error={detailError}
+                    revision={data.revision}
+                    relevance={
+                      selectedItem && {
+                        required: selectedItem.required,
+                        reason: selectedItem.reason,
+                      }
+                    }
+                    onSelect={(path) => {
+                      setSelected(path);
+                      setSource("");
+                    }}
+                    onFocus={(path) => setFilters({ ...filters, focus: path })}
+                  >
+                    {selectedItem ? (
+                      <details>
+                        <summary>Inspect selected source</summary>
+                        <pre>{selectedItem.content}</pre>
+                      </details>
+                    ) : (
+                      !demo &&
+                      task &&
+                      detail && (
+                        <button
+                          className="secondary"
+                          onClick={() =>
+                            void act("Reading bounded section", async () => {
+                              const r = await tool("read_section", {
+                                taskId: task.id,
+                                path: detail.path,
+                                start: 1,
+                                end: Math.min(detail.end, 100),
+                                reason:
+                                  "Inspect selected component to assess task impact",
+                              });
+                              setSource(r.content);
+                            })
+                          }
+                        >
+                          Read first 100 lines
+                        </button>
+                      )
+                    )}
+                    {source && <pre>{source}</pre>}
+                  </ComponentInspector>
                 </aside>
               </div>
               {view === "context" && task && (

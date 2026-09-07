@@ -33,6 +33,36 @@ export type GalaxyData = {
   kinds: string[];
   truncated: boolean;
 };
+export type ComponentDetail = {
+  path: string;
+  name: string;
+  kind: string;
+  subsystem: string;
+  start: number;
+  end: number;
+  bytes: number;
+  analysis?: string;
+  exclusionReason?: string;
+  symbols: {
+    id: string;
+    name: string;
+    kind: string;
+    start: number;
+    end: number;
+  }[];
+  incoming: {
+    path: string;
+    kind: string;
+    evidence: string;
+    confidence: number;
+  }[];
+  outgoing: {
+    path: string;
+    kind: string;
+    evidence: string;
+    confidence: number;
+  }[];
+};
 export const editSchema = z.object({
   path: z.string().min(1).max(400),
   content: z.string().max(256000).nullable(),
@@ -201,6 +231,53 @@ export class Service<S extends Storage = Store> {
       edges,
       kinds,
       truncated: false,
+    };
+  }
+  // Everything the inspector shows for one file. The galaxy holds every file,
+  // but only a page of them carries declarations and relationships, so the
+  // panel resolves the rest on demand.
+  async component(
+    p: Principal,
+    id: string,
+    path: string,
+  ): Promise<ComponentDetail> {
+    const r = await this.repo(p, id);
+    const file = r.graph.nodes.find(
+      (n) => n.kind === "file" && n.path === path,
+    );
+    assert(file, "File not indexed at this revision", 404);
+    const link = (e: (typeof r.graph.edges)[number], other: string) => ({
+      path: other,
+      kind: e.kind,
+      evidence: e.evidence,
+      confidence: e.confidence ?? 1,
+    });
+    return {
+      path: file.path,
+      name: file.name,
+      kind: file.kind,
+      subsystem: file.subsystem,
+      start: file.start,
+      end: file.end,
+      bytes: r.graph.files.find((f) => f.path === path)?.content.length ?? 0,
+      analysis: file.analysis,
+      exclusionReason: file.exclusionReason,
+      symbols: r.graph.nodes
+        .filter((n) => n.path === path && n.kind !== "file")
+        .slice(0, 200)
+        .map(({ id, name, kind, start, end }) => ({
+          id,
+          name,
+          kind,
+          start,
+          end,
+        })),
+      incoming: r.graph.edges
+        .filter((e) => e.to === path && e.kind !== "contains")
+        .map((e) => link(e, e.from)),
+      outgoing: r.graph.edges
+        .filter((e) => e.from === path && e.kind !== "contains")
+        .map((e) => link(e, e.to)),
     };
   }
   async begin(p: Principal, repoId: string, prompt: string, budget: number) {

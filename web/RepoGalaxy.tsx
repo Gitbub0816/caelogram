@@ -2,13 +2,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import {
-  applyFilters,
+  applyEmphasis,
   buildGalaxy,
   categoryColors,
   colorFor,
   defaultFilters,
   hash,
+  shift,
   type Body,
+  type Category,
   type Filters,
   type Galaxy,
   type GalaxyPayload,
@@ -60,7 +62,7 @@ void main(){
   vec3 color = mix(rock, star, step(1.5, vClass));
   gl_FragColor = vec4(color * vEmph, 1.0);
 }`;
-// Additive radial falloff, used for star coronae and the galactic core.
+// Additive radial falloff, used for star coronae.
 const glowVertex = `
 attribute float aScale; attribute vec3 gTint; attribute float gAlpha;
 varying vec2 vUv; varying vec3 vTint; varying float vAlpha;
@@ -78,7 +80,8 @@ void main(){
   float a = pow(max(0.0, 1.0 - d), 3.2) * vAlpha;
   gl_FragColor = vec4(vTint, a);
 }`;
-// Debris and background stars: soft round points, cheap at tens of thousands.
+// Debris, nebula haze and background stars: soft round points, cheap at tens of
+// thousands.
 const dustVertex = `
 attribute float aSize; attribute float aAlpha; attribute vec3 aColor;
 varying float vAlpha; varying vec3 vColor;
@@ -95,6 +98,14 @@ void main(){
   float d = length(gl_PointCoord - 0.5) * 2.0;
   if (d > 1.0) discard;
   gl_FragColor = vec4(vColor, pow(1.0 - d, 2.0) * vAlpha);
+}`;
+const nebulaFragment = `
+precision mediump float;
+varying float vAlpha; varying vec3 vColor;
+void main(){
+  float d = length(gl_PointCoord - 0.5) * 2.0;
+  if (d > 1.0) discard;
+  gl_FragColor = vec4(vColor, pow(1.0 - d, 3.0) * vAlpha);
 }`;
 
 type Props = {
@@ -127,32 +138,23 @@ export default function RepoGalaxy({
 }: Props) {
   const mount = useRef<HTMLDivElement>(null);
   const api = useRef<Api>(undefined);
+  // Camera survives a rebuild, so changing a filter re-arranges the galaxy
+  // under the viewer rather than throwing away where they were looking.
+  const view = useRef<{ position: THREE.Vector3; target: THREE.Vector3 }>(
+    undefined,
+  );
   const [failed, setFailed] = useState(false);
   const [spinning, setSpinning] = useState(false);
-  const [hover, setHover] = useState<{
-    body: Body;
-    x: number;
-    y: number;
-  }>();
-  const galaxy = useMemo(() => buildGalaxy(data), [data]);
-  const state = useRef({
-    selected,
-    onSelect,
-    relevant,
-    search,
-    filters,
-    galaxy,
-  });
-  state.current = { selected, onSelect, relevant, search, filters, galaxy };
+  const [hover, setHover] = useState<{ body: Body; x: number; y: number }>();
+  const galaxy = useMemo(() => buildGalaxy(data, filters), [data, filters]);
+  const state = useRef({ selected, onSelect, relevant, search, filters });
+  state.current = { selected, onSelect, relevant, search, filters };
   useEffect(() => onGalaxy?.(galaxy), [galaxy, onGalaxy]);
-  const shown = useMemo(
-    () => applyFilters(galaxy, filters, search, relevant),
-    [galaxy, filters, search, relevant],
-  );
-  const visibleCount = useMemo(
-    () => shown.visible.reduce((a, v) => a + v, 0),
-    [shown],
-  );
+  const counts = useMemo(() => {
+    const c = { star: 0, planet: 0, moon: 0, debris: 0 };
+    for (const b of galaxy.bodies) c[b.bodyClass]++;
+    return c;
+  }, [galaxy]);
 
   useEffect(() => {
     const host: HTMLDivElement | null = mount.current;
@@ -180,44 +182,55 @@ export default function RepoGalaxy({
       setFailed(true);
       return;
     }
-    renderer.setClearColor("#08090c");
+    renderer.setClearColor("#07080b");
     renderer.setPixelRatio(Math.min(devicePixelRatio, 1.75));
     host.appendChild(renderer.domElement);
     const scene = new THREE.Scene();
-    scene.fog = new THREE.FogExp2("#08090c", 0.0065);
-    const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 4000);
+    const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 6000);
     const controls = new OrbitControls(camera, renderer.domElement);
     const extent = galaxy.extent;
     controls.enableDamping = true;
     controls.dampingFactor = 0.09;
-    controls.minDistance = 1.5;
-    controls.maxDistance = extent * 6;
+    controls.minDistance = 1.2;
+    controls.maxDistance = extent * 7;
     controls.autoRotateSpeed = 0.32;
+    controls.zoomSpeed = 0.9;
     const reduce = matchMedia("(prefers-reduced-motion: reduce)");
     const disposables: { dispose: () => void }[] = [];
     const bodies = galaxy.bodies;
     const solid = bodies.filter((b) => b.bodyClass !== "debris");
     const debris = bodies.filter((b) => b.bodyClass === "debris");
     const stars = solid.filter((b) => b.bodyClass === "star");
+    const mode = state.current.filters.colorMode;
+    const tintOf = (b: Body) => new THREE.Color(colorFor(b, galaxy, mode));
 
-    // --- background starfield -------------------------------------------
-    {
-      const count = 2200,
-        pos = new Float32Array(count * 3),
-        size = new Float32Array(count),
-        alpha = new Float32Array(count),
-        color = new Float32Array(count * 3);
-      for (let i = 0; i < count; i++) {
-        const t = Math.random() * Math.PI * 2,
-          u = Math.random() * 2 - 1,
-          r = extent * (3.2 + Math.random() * 2.6),
-          s = Math.sqrt(1 - u * u);
-        pos.set([Math.cos(t) * s * r, u * r * 0.7, Math.sin(t) * s * r], i * 3);
-        size[i] = 0.4 + Math.random() * 1.1;
-        alpha[i] = 0.18 + Math.random() * 0.42;
-        const w = 0.72 + Math.random() * 0.28;
-        color.set([w, w * 0.97, w * 0.9], i * 3);
-      }
+    const points = (
+      count: number,
+      fill: (
+        i: number,
+        set: (
+          x: number,
+          y: number,
+          z: number,
+          size: number,
+          alpha: number,
+          color: number[],
+        ) => void,
+      ) => void,
+      fragment = dustFragment,
+    ) => {
+      const n = Math.max(1, count);
+      const pos = new Float32Array(n * 3),
+        size = new Float32Array(n),
+        alpha = new Float32Array(n),
+        color = new Float32Array(n * 3);
+      for (let i = 0; i < count; i++)
+        fill(i, (x, y, z, s, a, c) => {
+          pos.set([x, y, z], i * 3);
+          size[i] = s;
+          alpha[i] = a;
+          color.set(c, i * 3);
+        });
       const g = new THREE.BufferGeometry();
       g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
       g.setAttribute("aSize", new THREE.BufferAttribute(size, 1));
@@ -225,16 +238,79 @@ export default function RepoGalaxy({
       g.setAttribute("aColor", new THREE.BufferAttribute(color, 3));
       const m = new THREE.ShaderMaterial({
         vertexShader: dustVertex,
-        fragmentShader: dustFragment,
+        fragmentShader: fragment,
         transparent: true,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
-        fog: false,
       });
-      const points = new THREE.Points(g, m);
-      points.frustumCulled = false;
-      scene.add(points);
+      const object = new THREE.Points(g, m);
+      object.frustumCulled = false;
+      scene.add(object);
       disposables.push(g, m);
+      return { object, geometry: g, alpha, color };
+    };
+
+    // --- background starfield -------------------------------------------
+    points(2400, (_, set) => {
+      const t = Math.random() * Math.PI * 2,
+        u = Math.random() * 2 - 1,
+        r = extent * (3.4 + Math.random() * 2.8),
+        s = Math.sqrt(1 - u * u);
+      const w = 0.7 + Math.random() * 0.3;
+      // A few distant stars pick up a cool or warm cast, as real fields do.
+      const cast = Math.random();
+      set(
+        Math.cos(t) * s * r,
+        u * r * 0.7,
+        Math.sin(t) * s * r,
+        0.4 + Math.random() * 1.1,
+        0.16 + Math.random() * 0.4,
+        cast < 0.12
+          ? [w, w * 0.86, w * 0.7]
+          : cast > 0.9
+            ? [w * 0.76, w * 0.86, w]
+            : [w, w * 0.97, w * 0.92],
+      );
+    });
+
+    // --- nebula: the milky band, drawn from the bodies themselves ---------
+    // Each file scatters a little gas around itself, tinted like its subsystem
+    // and warmed toward the core, so the haze traces the real arms instead of
+    // being decorative noise.
+    if (bodies.length > 1) {
+      // Additive haze from many hues converges on grey, so each cloud is
+      // pushed away from its own luminance and kept sparse; the core is left
+      // clear so the stars there stay crisp.
+      const per = bodies.length > 4000 ? 1 : bodies.length > 1200 ? 3 : 8;
+      const saturate = (c: number[], k = 1.85) => {
+        const l = (c[0] + c[1] + c[2]) / 3;
+        return c.map((v) => Math.max(0, Math.min(1, l + (v - l) * k)));
+      };
+      points(
+        bodies.length * per,
+        (i, set) => {
+          const b = bodies[Math.floor(i / per)];
+          const seed = hash(b.path + i);
+          const rnd = (k: number) =>
+            (((seed * (k * 2654435761)) >>> 8) % 1000) / 1000;
+          const spin = rnd(1) * Math.PI * 2,
+            spanR = extent * (0.02 + rnd(2) * 0.08),
+            lift = (rnd(3) - 0.5) * extent * 0.05;
+          const tint = saturate(shift(b.color, b.depth, 0.5));
+          set(
+            b.x + Math.cos(spin) * spanR,
+            b.y + lift,
+            b.z + Math.sin(spin) * spanR,
+            16 + rnd(4) * 34,
+            // Fades out toward the bright core and the empty rim.
+            b.depth < 0.14
+              ? 0
+              : (0.008 + rnd(5) * 0.016) * (1 - b.depth * 0.45),
+            tint,
+          );
+        },
+        nebulaFragment,
+      );
     }
 
     // --- galactic core glow ---------------------------------------------
@@ -242,7 +318,7 @@ export default function RepoGalaxy({
       const g = new THREE.PlaneGeometry(1, 1);
       const m = new THREE.ShaderMaterial({
         vertexShader: `varying vec2 vUv; void main(){ vUv = uv; vec4 c = modelViewMatrix * vec4(0.,0.,0.,1.); c.xy += position.xy * ${(extent * 1.7).toFixed(2)}; gl_Position = projectionMatrix * c; }`,
-        fragmentShader: `precision mediump float; varying vec2 vUv; void main(){ float d = length(vUv - 0.5) * 2.0; float a = pow(max(0.0, 1.0 - d), 3.6) * 0.16; gl_FragColor = vec4(0.98, 0.86, 0.62, a); }`,
+        fragmentShader: `precision mediump float; varying vec2 vUv; void main(){ float d = length(vUv - 0.5) * 2.0; float a = pow(max(0.0, 1.0 - d), 3.6); gl_FragColor = vec4(mix(vec3(0.72,0.80,1.0), vec3(1.0,0.87,0.62), a), a * 0.20); }`,
         transparent: true,
         depthWrite: false,
         depthTest: false,
@@ -258,10 +334,10 @@ export default function RepoGalaxy({
     // --- solid bodies (moons, planets, stars) ----------------------------
     const sphere = new THREE.SphereGeometry(1, 28, 20);
     disposables.push(sphere);
-    const tint = new Float32Array(solid.length * 3),
-      seed = new Float32Array(solid.length),
-      cls = new Float32Array(solid.length),
-      emph = new Float32Array(solid.length);
+    const tint = new Float32Array(Math.max(1, solid.length) * 3),
+      seed = new Float32Array(Math.max(1, solid.length)),
+      cls = new Float32Array(Math.max(1, solid.length)),
+      emph = new Float32Array(Math.max(1, solid.length)).fill(1);
     for (let i = 0; i < solid.length; i++) {
       seed[i] = hash(solid[i].path) % 97;
       cls[i] =
@@ -270,7 +346,8 @@ export default function RepoGalaxy({
           : solid[i].bodyClass === "planet"
             ? 1
             : 0;
-      emph[i] = 1;
+      const c = tintOf(solid[i]);
+      tint.set([c.r, c.g, c.b], i * 3);
     }
     sphere.setAttribute("aTint", new THREE.InstancedBufferAttribute(tint, 3));
     sphere.setAttribute("aSeed", new THREE.InstancedBufferAttribute(seed, 1));
@@ -289,13 +366,18 @@ export default function RepoGalaxy({
     solidMesh.frustumCulled = false;
     solidMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     scene.add(solidMesh);
+    const matrix = new THREE.Matrix4(),
+      scale = new THREE.Vector3(),
+      position = new THREE.Vector3(),
+      quaternion = new THREE.Quaternion(),
+      projected = new THREE.Vector3();
 
     // --- star coronae ----------------------------------------------------
     const glowPlane = new THREE.PlaneGeometry(1, 1);
     disposables.push(glowPlane);
     const gScale = new Float32Array(Math.max(1, stars.length)),
       gTint = new Float32Array(Math.max(1, stars.length) * 3),
-      gAlpha = new Float32Array(Math.max(1, stars.length));
+      gAlpha = new Float32Array(Math.max(1, stars.length)).fill(0.42);
     glowPlane.setAttribute(
       "aScale",
       new THREE.InstancedBufferAttribute(gScale, 1),
@@ -324,40 +406,43 @@ export default function RepoGalaxy({
     glowMesh.frustumCulled = false;
     glowMesh.renderOrder = 2;
     scene.add(glowMesh);
+    for (let i = 0; i < stars.length; i++) {
+      const b = stars[i];
+      position.set(b.x, b.y, b.z);
+      scale.setScalar(1);
+      matrix.compose(position, quaternion, scale);
+      glowMesh.setMatrixAt(i, matrix);
+      gScale[i] = b.radius * 6;
+      const c = tintOf(b);
+      gTint.set([c.r, c.g, c.b], i * 3);
+    }
+    glowMesh.instanceMatrix.needsUpdate = true;
 
     // --- debris field ----------------------------------------------------
-    const debrisGeometry = new THREE.BufferGeometry();
-    const dPos = new Float32Array(Math.max(1, debris.length) * 3),
-      dSize = new Float32Array(Math.max(1, debris.length)),
-      dAlpha = new Float32Array(Math.max(1, debris.length)),
-      dColor = new Float32Array(Math.max(1, debris.length) * 3);
-    for (let i = 0; i < debris.length; i++) {
-      dPos.set([debris[i].x, debris[i].y, debris[i].z], i * 3);
-      dSize[i] = 1.5 + Math.min(1.4, Math.log2(debris[i].bytes + 2) * 0.14);
-    }
-    debrisGeometry.setAttribute("position", new THREE.BufferAttribute(dPos, 3));
-    debrisGeometry.setAttribute("aSize", new THREE.BufferAttribute(dSize, 1));
-    debrisGeometry.setAttribute("aAlpha", new THREE.BufferAttribute(dAlpha, 1));
-    debrisGeometry.setAttribute("aColor", new THREE.BufferAttribute(dColor, 3));
-    const debrisMaterial = new THREE.ShaderMaterial({
-      vertexShader: dustVertex,
-      fragmentShader: dustFragment,
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      fog: false,
+    const debrisLayer = points(debris.length, (i, set) => {
+      const b = debris[i],
+        c = tintOf(b);
+      set(
+        b.x,
+        b.y,
+        b.z,
+        1.6 + Math.min(1.4, Math.log2(b.bytes + 2) * 0.14),
+        0.55,
+        [c.r, c.g, c.b],
+      );
     });
-    disposables.push(debrisGeometry, debrisMaterial);
-    const debrisPoints = new THREE.Points(debrisGeometry, debrisMaterial);
-    debrisPoints.frustumCulled = false;
-    scene.add(debrisPoints);
 
     // --- relationships ---------------------------------------------------
+    const ePos = new Float32Array(Math.max(1, galaxy.edges.length) * 6),
+      eColor = new Float32Array(Math.max(1, galaxy.edges.length) * 6);
     const edgeGeometry = new THREE.BufferGeometry();
-    const ePos = new Float32Array(galaxy.edges.length * 6),
-      eColor = new Float32Array(galaxy.edges.length * 6);
     edgeGeometry.setAttribute("position", new THREE.BufferAttribute(ePos, 3));
     edgeGeometry.setAttribute("color", new THREE.BufferAttribute(eColor, 3));
+    for (let i = 0; i < galaxy.edges.length; i++) {
+      const a = bodies[galaxy.edges[i].from],
+        b = bodies[galaxy.edges[i].to];
+      ePos.set([a.x, a.y, a.z, b.x, b.y, b.z], i * 6);
+    }
     const edgeMaterial = new THREE.LineBasicMaterial({
       vertexColors: true,
       transparent: true,
@@ -369,9 +454,9 @@ export default function RepoGalaxy({
     edgeLines.frustumCulled = false;
     scene.add(edgeLines);
     // Arcs for the selected file's own relationships, drawn brightly on top.
-    const arcGeometry = new THREE.BufferGeometry();
     const ARC = 14;
     const aPos = new Float32Array(1024 * ARC * 6);
+    const arcGeometry = new THREE.BufferGeometry();
     arcGeometry.setAttribute("position", new THREE.BufferAttribute(aPos, 3));
     const arcMaterial = new THREE.LineBasicMaterial({
       color: "#ffdca3",
@@ -394,163 +479,98 @@ export default function RepoGalaxy({
       .map((b, i) => ({ b, i }))
       .sort((a, b) => b.b.importance - a.b.importance)
       .slice(0, 60)
-      .map(({ b, i }) => {
+      .map(({ b }) => {
         const element = document.createElement("span");
         element.textContent = b.name;
         labelLayer.appendChild(element);
-        return { element, body: b, instance: i };
+        return { element, body: b };
       });
 
-    const matrix = new THREE.Matrix4(),
-      scale = new THREE.Vector3(),
-      position = new THREE.Vector3(),
-      quaternion = new THREE.Quaternion(),
-      projected = new THREE.Vector3();
-    const solidIndex = new Map(solid.map((b, i) => [b.path, i] as const));
-
-    let cachedVisibility = applyFilters(
-      galaxy,
-      state.current.filters,
-      state.current.search,
-      state.current.relevant,
-    );
-    const latestVisibility = () => cachedVisibility;
-    // Rebuilds every buffer that depends on filters, colouring or selection.
+    // Only emphasis and the selection change without a rebuild; positions and
+    // the relationship web are fixed for a given filter set.
     function sync() {
-      const {
-        filters: f,
-        search: q,
-        relevant: rel,
-        selected: sel,
-      } = state.current;
-      cachedVisibility = applyFilters(galaxy, f, q, rel);
-      const { visible, emphasis } = cachedVisibility;
-      const kinds = new Set(f.edgeKinds);
+      const { search: q, relevant: rel, selected: sel } = state.current;
+      const emphasis = applyEmphasis(galaxy, q, rel);
       for (let i = 0; i < solid.length; i++) {
-        const b = solid[i];
-        const on = visible[b.index] === 1;
-        const chosen = b.path === sel;
+        const b = solid[i],
+          chosen = b.path === sel;
         position.set(b.x, b.y, b.z);
-        scale.setScalar(on ? b.radius * (chosen ? 1.35 : 1) : 0);
+        scale.setScalar(b.radius * (chosen ? 1.4 : 1));
         matrix.compose(position, quaternion, scale);
         solidMesh.setMatrixAt(i, matrix);
-        const c = new THREE.Color(colorFor(b, galaxy, f.colorMode));
-        tint.set([c.r, c.g, c.b], i * 3);
         emph[i] = chosen ? 1.9 : emphasis[b.index];
       }
       solidMesh.instanceMatrix.needsUpdate = true;
-      (sphere.getAttribute("aTint") as THREE.BufferAttribute).needsUpdate =
-        true;
       (sphere.getAttribute("aEmph") as THREE.BufferAttribute).needsUpdate =
         true;
-      for (let i = 0; i < stars.length; i++) {
-        const b = stars[i];
-        const on = visible[b.index] === 1;
-        position.set(b.x, b.y, b.z);
-        scale.setScalar(1);
-        matrix.compose(position, quaternion, scale);
-        glowMesh.setMatrixAt(i, matrix);
-        gScale[i] = b.radius * 6.0;
-        const c = new THREE.Color(colorFor(b, galaxy, f.colorMode));
-        gTint.set([c.r, c.g, c.b], i * 3);
-        gAlpha[i] = on ? 0.42 * emphasis[b.index] : 0;
-      }
-      glowMesh.instanceMatrix.needsUpdate = true;
-      (glowPlane.getAttribute("aScale") as THREE.BufferAttribute).needsUpdate =
-        true;
-      (glowPlane.getAttribute("gTint") as THREE.BufferAttribute).needsUpdate =
-        true;
+      for (let i = 0; i < stars.length; i++)
+        gAlpha[i] = 0.42 * emphasis[stars[i].index];
       (glowPlane.getAttribute("gAlpha") as THREE.BufferAttribute).needsUpdate =
         true;
-      for (let i = 0; i < debris.length; i++) {
-        const b = debris[i];
-        const on = visible[b.index] === 1;
-        const c = new THREE.Color(colorFor(b, galaxy, f.colorMode));
-        dColor.set([c.r, c.g, c.b], i * 3);
-        dAlpha[i] = on ? 0.5 * emphasis[b.index] : 0;
-      }
+      for (let i = 0; i < debris.length; i++)
+        debrisLayer.alpha[i] = 0.55 * emphasis[debris[i].index];
       (
-        debrisGeometry.getAttribute("aAlpha") as THREE.BufferAttribute
+        debrisLayer.geometry.getAttribute("aAlpha") as THREE.BufferAttribute
       ).needsUpdate = true;
-      (
-        debrisGeometry.getAttribute("aColor") as THREE.BufferAttribute
-      ).needsUpdate = true;
-      // Base relationship web: only links whose endpoints both survive.
-      let e = 0;
-      for (const edge of galaxy.edges) {
-        if (kinds.size && !kinds.has(edge.kind)) continue;
-        if (!visible[edge.from] || !visible[edge.to]) continue;
-        const a = bodies[edge.from],
+      const only = state.current.filters.links === "selected";
+      for (let i = 0; i < galaxy.edges.length; i++) {
+        const edge = galaxy.edges[i],
+          a = bodies[edge.from],
           b = bodies[edge.to];
-        ePos.set([a.x, a.y, a.z, b.x, b.y, b.z], e * 6);
+        const touches = a.path === sel || b.path === sel;
         const dim =
-          (sel && a.path !== sel && b.path !== sel ? 0.04 : 0.45) *
-          Math.min(emphasis[edge.from], emphasis[edge.to]);
+          (only && !touches
+            ? 0
+            : sel && !touches
+              ? 0.045
+              : touches
+                ? 0.45
+                : 0.1) * Math.min(emphasis[edge.from], emphasis[edge.to]);
         const warm =
-          edge.kind === "tests" ? [0.42, 0.6, 0.78] : [0.78, 0.62, 0.36];
-        eColor.set(
-          [
-            warm[0] * dim,
-            warm[1] * dim,
-            warm[2] * dim,
-            warm[0] * dim,
-            warm[1] * dim,
-            warm[2] * dim,
-          ],
-          e * 6,
-        );
-        e++;
+          edge.kind === "tests" ? [0.42, 0.62, 0.82] : [0.82, 0.64, 0.36];
+        for (const o of [i * 6, i * 6 + 3])
+          eColor.set([warm[0] * dim, warm[1] * dim, warm[2] * dim], o);
       }
-      edgeGeometry.setDrawRange(0, e * 2);
-      (
-        edgeGeometry.getAttribute("position") as THREE.BufferAttribute
-      ).needsUpdate = true;
       (
         edgeGeometry.getAttribute("color") as THREE.BufferAttribute
       ).needsUpdate = true;
-      // Bright arcs from the selection to everything it touches.
-      let a = 0;
+      let drawn = 0;
       const chosenBody = sel ? galaxy.byPath.get(sel) : undefined;
       if (chosenBody)
         for (const edge of galaxy.edges) {
           if (edge.from !== chosenBody.index && edge.to !== chosenBody.index)
             continue;
-          if (kinds.size && !kinds.has(edge.kind)) continue;
-          if (!visible[edge.from] || !visible[edge.to]) continue;
-          if (a >= 1024) break;
+          if (drawn >= 1024) break;
           const from = bodies[edge.from],
             to = bodies[edge.to];
-          const mid = new THREE.Vector3(
-            (from.x + to.x) / 2,
-            (from.y + to.y) / 2 +
-              Math.hypot(from.x - to.x, from.z - to.z) * 0.22,
-            (from.z + to.z) / 2,
-          );
           const curve = new THREE.QuadraticBezierCurve3(
             new THREE.Vector3(from.x, from.y, from.z),
-            mid,
+            new THREE.Vector3(
+              (from.x + to.x) / 2,
+              (from.y + to.y) / 2 +
+                Math.hypot(from.x - to.x, from.z - to.z) * 0.22,
+              (from.z + to.z) / 2,
+            ),
             new THREE.Vector3(to.x, to.y, to.z),
           );
           const pts = curve.getPoints(ARC);
           for (let s = 0; s < ARC; s++) {
-            const o = (a * ARC + s) * 6;
+            const o = (drawn * ARC + s) * 6;
             aPos.set([pts[s].x, pts[s].y, pts[s].z], o);
             aPos.set([pts[s + 1].x, pts[s + 1].y, pts[s + 1].z], o + 3);
           }
-          a++;
+          drawn++;
         }
-      arcGeometry.setDrawRange(0, a * ARC * 2);
+      arcGeometry.setDrawRange(0, drawn * ARC * 2);
       (
         arcGeometry.getAttribute("position") as THREE.BufferAttribute
       ).needsUpdate = true;
-      for (const label of labels)
-        label.element.dataset.on = visible[label.body.index] ? "1" : "0";
       request();
     }
 
     // --- interaction ------------------------------------------------------
     const raycaster = new THREE.Raycaster();
-    raycaster.params.Points = { threshold: 0.55 };
+    raycaster.params.Points = { threshold: Math.max(0.35, extent * 0.012) };
     const pointer = new THREE.Vector2();
     function pick(e: PointerEvent): Body | undefined {
       const r = renderer.domElement.getBoundingClientRect();
@@ -560,7 +580,7 @@ export default function RepoGalaxy({
       );
       raycaster.setFromCamera(pointer, camera);
       const solidHit = raycaster.intersectObject(solidMesh, false)[0];
-      const dustHit = raycaster.intersectObject(debrisPoints, false)[0];
+      const dustHit = raycaster.intersectObject(debrisLayer.object, false)[0];
       const best =
         solidHit && dustHit
           ? solidHit.distance <= dustHit.distance
@@ -568,13 +588,9 @@ export default function RepoGalaxy({
             : dustHit
           : (solidHit ?? dustHit);
       if (!best) return undefined;
-      const body =
-        best.object === solidMesh
-          ? solid[best.instanceId ?? -1]
-          : debris[best.index ?? -1];
-      if (!body) return undefined;
-      const { visible } = latestVisibility();
-      return visible[body.index] ? body : undefined;
+      return best.object === solidMesh
+        ? solid[best.instanceId ?? -1]
+        : debris[best.index ?? -1];
     }
     let downAt = { x: 0, y: 0 };
     const pointerDown = (e: PointerEvent) => {
@@ -607,43 +623,44 @@ export default function RepoGalaxy({
 
     const taken = new Set<string>();
     let frame = 0,
-      dirty = true,
       onScreen = true,
       disposed = false;
     function request() {
-      dirty = true;
       if (!frame && onScreen) frame = requestAnimationFrame(render);
     }
     function render() {
       frame = 0;
       if (disposed || !onScreen) return;
       const moving = controls.update();
-      // Labels are drawn front to back and skipped when they would land on a
-      // cell another label already claimed, so the core stops piling up.
+      view.current = {
+        position: camera.position.clone(),
+        target: controls.target.clone(),
+      };
+      // Labels are drawn most-important first and skipped when they would land
+      // on a cell another label already claimed, so the core stops piling up.
       taken.clear();
       for (const label of labels) {
         const b = label.body;
         projected.set(b.x, b.y + b.radius + 0.9, b.z).project(camera);
         const chosen = b.path === state.current.selected;
         const near = camera.position.distanceTo(controls.target) < extent * 0.9;
-        const show =
-          label.element.dataset.on === "1" &&
-          (chosen || b.bodyClass === "star" || near) &&
+        const onscreen =
           Math.abs(projected.x) < 0.97 &&
           Math.abs(projected.y) < 0.96 &&
           projected.z < 1;
         const sx = (projected.x * 0.5 + 0.5) * stage.clientWidth,
           sy = (-projected.y * 0.5 + 0.5) * stage.clientHeight;
-        const cell = `${Math.round(sx / 92)}:${Math.round(sy / 18)}`;
+        const cell = `${Math.round(sx / 96)}:${Math.round(sy / 18)}`;
         const free = chosen || !taken.has(cell);
-        if (free) taken.add(cell);
-        label.element.style.display = show && free ? "block" : "none";
-        if (show && free)
+        const show =
+          onscreen && free && (chosen || b.bodyClass === "star" || near);
+        if (show) taken.add(cell);
+        label.element.style.display = show ? "block" : "none";
+        if (show)
           label.element.style.transform = `translate(${sx}px,${sy}px) translate(-50%,-100%)`;
         label.element.classList.toggle("is-selected", chosen);
       }
       renderer.render(scene, camera);
-      dirty = false;
       if (controls.autoRotate || moving) request();
     }
     const reset = () => {
@@ -685,8 +702,8 @@ export default function RepoGalaxy({
       if (e.key === "ArrowRight") s.theta += 0.12;
       if (e.key === "ArrowUp") s.phi = Math.max(0.05, s.phi - 0.12);
       if (e.key === "ArrowDown") s.phi = Math.min(Math.PI - 0.05, s.phi + 0.12);
-      if (e.key === "+") s.radius = Math.max(1.5, s.radius * 0.85);
-      if (e.key === "-") s.radius = Math.min(extent * 6, s.radius / 0.85);
+      if (e.key === "+") s.radius = Math.max(1.2, s.radius * 0.85);
+      if (e.key === "-") s.radius = Math.min(extent * 7, s.radius / 0.85);
       camera.position.copy(
         new THREE.Vector3().setFromSpherical(s).add(controls.target),
       );
@@ -740,7 +757,12 @@ export default function RepoGalaxy({
       },
     };
     sync();
-    reset();
+    if (view.current) {
+      camera.position.copy(view.current.position);
+      controls.target.copy(view.current.target);
+      controls.update();
+      request();
+    } else reset();
     return () => {
       disposed = true;
       cancelAnimationFrame(frame);
@@ -761,13 +783,11 @@ export default function RepoGalaxy({
       labelLayer.remove();
       api.current = undefined;
     };
-    // `dirty` is written by request() and read by render(); the linter cannot
-    // see the closure, so it is intentionally left out of the dependency list.
   }, [galaxy, failed]);
 
   useEffect(() => {
     api.current?.sync();
-  }, [filters, selected, search, relevant]);
+  }, [selected, search, relevant]);
   // Only pan for selections the viewer makes; the page opens on the whole map.
   const firstSelection = useRef(true);
   useEffect(() => {
@@ -777,12 +797,6 @@ export default function RepoGalaxy({
     }
     if (selected) api.current?.focus(selected);
   }, [selected]);
-
-  const counts = useMemo(() => {
-    const c = { star: 0, planet: 0, moon: 0, debris: 0 };
-    for (const b of galaxy.bodies) if (shown.visible[b.index]) c[b.bodyClass]++;
-    return c;
-  }, [galaxy, shown]);
 
   if (failed)
     return (
@@ -801,39 +815,14 @@ export default function RepoGalaxy({
         className="galaxy-canvas"
         tabIndex={0}
         role="group"
-        aria-label={`Repository galaxy. ${visibleCount} of ${galaxy.bodies.length} files shown. Drag to orbit, scroll to approach, arrow keys rotate, plus and minus zoom, Home resets. Use the Components view for a list.`}
+        aria-label={`Repository galaxy. ${galaxy.bodies.length} of ${galaxy.total} files shown. Drag to orbit, scroll to approach, arrow keys rotate, plus and minus zoom, Home resets. Use the Components view for a list.`}
       />
       <GalaxyFilters
         galaxy={galaxy}
         filters={filters}
         onFilters={onFilters}
-        visible={visibleCount}
+        counts={counts}
       />
-      <div className="galaxy-legend">
-        <h4>Body type follows relational weight</h4>
-        <ul>
-          <li>
-            <i className="dot star" /> Star · {galaxy.cuts.star}+ incoming ·{" "}
-            {counts.star}
-          </li>
-          <li>
-            <i className="dot planet" /> Planet · {galaxy.cuts.planet}+ incoming
-            · {counts.planet}
-          </li>
-          <li>
-            <i className="dot moon" /> Moon · linked at least once ·{" "}
-            {counts.moon}
-          </li>
-          <li>
-            <i className="dot debris" /> Debris · no resolved links ·{" "}
-            {counts.debris}
-          </li>
-        </ul>
-        <p>
-          Distance from the core is inverse to importance. Gold links are
-          imports, blue links are tests.
-        </p>
-      </div>
       <div className="galaxy-controls">
         <span>Drag to orbit · scroll to approach</span>
         <div>
@@ -869,12 +858,12 @@ function GalaxyFilters({
   galaxy,
   filters,
   onFilters,
-  visible,
+  counts,
 }: {
   galaxy: Galaxy;
   filters: Filters;
   onFilters: (next: Filters) => void;
-  visible: number;
+  counts: Record<string, number>;
 }) {
   const [open, setOpen] = useState(true);
   const set = (patch: Partial<Filters>) => onFilters({ ...filters, ...patch });
@@ -885,14 +874,15 @@ function GalaxyFilters({
     filters.categories.length > 0 ||
     filters.minIncoming > 0 ||
     filters.edgeKinds.length > 0 ||
+    filters.links !== "all" ||
     !!filters.focus;
   return (
     <div className={`galaxy-filters${open ? "" : " collapsed"}`}>
       <button className="filters-head" onClick={() => setOpen(!open)}>
         <span>Filters</span>
         <small>
-          {visible.toLocaleString()} / {galaxy.bodies.length.toLocaleString()}{" "}
-          files
+          {galaxy.bodies.length.toLocaleString()} /{" "}
+          {galaxy.total.toLocaleString()} files
         </small>
         <i>{open ? "−" : "+"}</i>
       </button>
@@ -921,7 +911,7 @@ function GalaxyFilters({
             </section>
           )}
           <section>
-            <h5>Importance</h5>
+            <h5>Components</h5>
             <label className="slider">
               <span>
                 At least <b>{filters.minIncoming}</b> incoming
@@ -935,11 +925,8 @@ function GalaxyFilters({
                 onChange={(e) => set({ minIncoming: Number(e.target.value) })}
               />
             </label>
-          </section>
-          <section>
-            <h5>Subsystem</h5>
             <div className="chips">
-              {galaxy.regions.slice(0, 14).map((r) => (
+              {galaxy.regions.slice(0, 16).map((r) => (
                 <button
                   key={r.name}
                   className={
@@ -955,9 +942,6 @@ function GalaxyFilters({
                 </button>
               ))}
             </div>
-          </section>
-          <section>
-            <h5>File type</h5>
             <div className="chips">
               {galaxy.categories.map((c) => (
                 <button
@@ -966,7 +950,12 @@ function GalaxyFilters({
                     filters.categories.includes(c.name) ? "chip on" : "chip"
                   }
                   onClick={() =>
-                    set({ categories: toggle(filters.categories, c.name) })
+                    set({
+                      categories: toggle(
+                        filters.categories,
+                        c.name as Category,
+                      ),
+                    })
                   }
                 >
                   <i style={{ background: categoryColors[c.name] }} />
@@ -976,26 +965,49 @@ function GalaxyFilters({
               ))}
             </div>
           </section>
-          {galaxy.kinds.length > 1 && (
-            <section>
-              <h5>Relationship</h5>
-              <div className="chips">
-                {galaxy.kinds.map((k) => (
-                  <button
-                    key={k}
-                    className={
-                      filters.edgeKinds.includes(k) ? "chip on" : "chip"
-                    }
-                    onClick={() =>
-                      set({ edgeKinds: toggle(filters.edgeKinds, k) })
-                    }
-                  >
-                    {k}
-                  </button>
-                ))}
-              </div>
-            </section>
-          )}
+          <section>
+            <h5>Relationships</h5>
+            <div className="segmented small">
+              {(
+                [
+                  ["all", "All"],
+                  ["selected", "Selected"],
+                  ["none", "Hidden"],
+                ] as const
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  className={filters.links === value ? "selected" : ""}
+                  onClick={() => set({ links: value })}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="chips">
+              {galaxy.kinds.map((k) => (
+                <button
+                  key={k}
+                  className={filters.edgeKinds.includes(k) ? "chip on" : "chip"}
+                  disabled={filters.links === "none"}
+                  onClick={() =>
+                    set({ edgeKinds: toggle(filters.edgeKinds, k) })
+                  }
+                >
+                  <i
+                    style={{
+                      background: k === "tests" ? "#6b9ed1" : "#d1a35c",
+                    }}
+                  />
+                  {k}
+                </button>
+              ))}
+            </div>
+            <p className="filters-note">
+              {galaxy.edges.length.toLocaleString()} relationships between the
+              files on screen.
+            </p>
+          </section>
           <section>
             <h5>Colour by</h5>
             <div className="segmented small">
@@ -1014,6 +1026,33 @@ function GalaxyFilters({
               ))}
             </div>
           </section>
+          <section className="filters-key">
+            <h5>Body type</h5>
+            <ul>
+              <li>
+                <i className="dot star" /> Star · {galaxy.cuts.star}+ incoming
+                <em>{counts.star}</em>
+              </li>
+              <li>
+                <i className="dot planet" /> Planet · {galaxy.cuts.planet}+
+                incoming
+                <em>{counts.planet}</em>
+              </li>
+              <li>
+                <i className="dot moon" /> Moon · linked at least once
+                <em>{counts.moon}</em>
+              </li>
+              <li>
+                <i className="dot debris" /> Debris · no resolved links
+                <em>{counts.debris}</em>
+              </li>
+            </ul>
+            <p className="filters-note">
+              Body type comes from links across the whole repository. Distance
+              from the core ranks the files currently on screen, so filtering
+              re-arranges the galaxy.
+            </p>
+          </section>
           {dirty && (
             <button
               className="filters-reset"
@@ -1021,8 +1060,8 @@ function GalaxyFilters({
                 onFilters({ ...defaultFilters, colorMode: filters.colorMode })
               }
             >
-              Reset filters — {visible.toLocaleString()} of{" "}
-              {galaxy.bodies.length.toLocaleString()} files shown
+              Reset filters — showing {galaxy.bodies.length.toLocaleString()} of{" "}
+              {galaxy.total.toLocaleString()} files
             </button>
           )}
         </div>

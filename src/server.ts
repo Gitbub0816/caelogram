@@ -229,6 +229,20 @@ export function createServer(service: Service, devToken?: string) {
       next(e);
     }
   });
+  app.get("/api/component/:repoId", async (req, res, next) => {
+    try {
+      assert(typeof req.query.path === "string", "Provide a file path");
+      res.json(
+        await service.component(
+          res.locals.principal,
+          req.params.repoId,
+          req.query.path,
+        ),
+      );
+    } catch (e) {
+      next(e);
+    }
+  });
   app.get("/api/history/:repoId", async (req, res, next) => {
     try {
       const p = res.locals.principal as Principal;

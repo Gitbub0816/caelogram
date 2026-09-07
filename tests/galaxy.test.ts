@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  applyFilters,
+  applyEmphasis,
   buildGalaxy,
   categorize,
   defaultFilters,
@@ -82,51 +82,100 @@ test("body type follows relational weight and the core holds the hubs", () => {
     assert(Math.hypot(b.x, b.z) <= galaxy.extent * 1.2);
 });
 
-test("filters narrow by subsystem, importance, type and neighbourhood", () => {
-  const galaxy = buildGalaxy(synthetic(600, 900));
-  const all = applyFilters(galaxy, defaultFilters, "", []);
+test("filters re-lay-out the galaxy instead of leaving holes in it", () => {
+  const payload = synthetic(600, 900);
+  const all = buildGalaxy(payload, defaultFilters);
+  assert.equal(all.bodies.length, 600);
+  assert.equal(all.total, 600);
+
+  const region = all.regions[0].name;
+  const byRegion = buildGalaxy(payload, {
+    ...defaultFilters,
+    regions: [region],
+  });
   assert.equal(
-    all.visible.reduce((n, v) => n + v, 0),
-    galaxy.bodies.length,
+    byRegion.bodies.length,
+    all.bodies.filter((b) => b.region === region).length,
   );
-  const region = galaxy.regions[0].name;
-  const byRegion = applyFilters(
-    galaxy,
-    { ...defaultFilters, regions: [region] },
-    "",
-    [],
+  assert(byRegion.bodies.every((b) => b.region === region));
+  assert.equal(byRegion.total, 600);
+  // The survivors are re-ranked, so the filtered view still fills a disk from
+  // core to rim rather than keeping the gaps the hidden files left behind.
+  const depths = byRegion.bodies.map((b) => b.depth).sort((a, b) => a - b);
+  assert.equal(depths[0], 0);
+  assert.equal(depths.at(-1), 1);
+  const moved = byRegion.bodies.filter(
+    (b) => all.byPath.get(b.path)!.depth !== b.depth,
   );
-  assert.equal(
-    byRegion.visible.reduce((n, v) => n + v, 0),
-    galaxy.bodies.filter((b) => b.region === region).length,
-  );
-  const important = applyFilters(
-    galaxy,
-    { ...defaultFilters, minIncoming: 2 },
-    "",
-    [],
-  );
+  assert(moved.length > 0, "filtering should re-arrange the remaining bodies");
+  // A file's nature still comes from the whole repository, not from the view.
+  for (const b of byRegion.bodies) {
+    const before = all.byPath.get(b.path)!;
+    assert.equal(b.bodyClass, before.bodyClass);
+    assert.equal(b.incoming, before.incoming);
+  }
+  // Only relationships between visible files survive, re-indexed to match.
+  for (const e of byRegion.edges) {
+    assert(byRegion.bodies[e.from] && byRegion.bodies[e.to]);
+    assert.equal(byRegion.bodies[e.from].region, region);
+    assert.equal(byRegion.bodies[e.to].region, region);
+  }
+
+  const important = buildGalaxy(payload, {
+    ...defaultFilters,
+    minIncoming: 2,
+  });
   assert(
-    galaxy.bodies.every(
-      (b) => (important.visible[b.index] === 1) === b.incoming >= 2,
-    ),
+    important.bodies.every((b) => b.incoming >= 2) &&
+      important.bodies.length ===
+        all.bodies.filter((b) => b.incoming >= 2).length,
   );
-  const hub = [...galaxy.bodies].sort((a, b) => b.incoming - a.incoming)[0];
-  const focused = applyFilters(
-    galaxy,
-    { ...defaultFilters, focus: hub.path, depth: 1 },
-    "",
-    [],
-  );
-  const neighbours = new Set(galaxy.adjacency.get(hub.index) ?? []);
-  assert.equal(focused.visible[hub.index], 1);
+
+  const hub = [...all.bodies].sort((a, b) => b.incoming - a.incoming)[0];
+  const focused = buildGalaxy(payload, {
+    ...defaultFilters,
+    focus: hub.path,
+    depth: 1,
+  });
+  assert(focused.byPath.has(hub.path));
   assert.equal(
-    focused.visible.reduce((n, v) => n + v, 0),
-    neighbours.size + 1,
+    focused.bodies.length,
+    new Set(all.adjacency.get(hub.index) ?? []).size + 1,
   );
-  // A search term dims the rest rather than removing it.
-  const searched = applyFilters(galaxy, defaultFilters, hub.name, []);
-  assert.equal(searched.emphasis[hub.index], 1);
+});
+
+test("relationship filters change the web without hiding components", () => {
+  const payload = payloadFromMapData(mapData);
+  const all = buildGalaxy(payload, defaultFilters);
+  assert(all.edges.length > 0);
+  const hidden = buildGalaxy(payload, { ...defaultFilters, links: "none" });
+  assert.equal(hidden.edges.length, 0);
+  assert.equal(hidden.bodies.length, all.bodies.length);
+  const kind = all.edges[0].kind;
+  const oneKind = buildGalaxy(payload, {
+    ...defaultFilters,
+    edgeKinds: [kind],
+  });
+  assert(oneKind.edges.every((e) => e.kind === kind));
+  assert.equal(
+    oneKind.edges.length,
+    all.edges.filter((e) => e.kind === kind).length,
+  );
+  assert.equal(oneKind.bodies.length, all.bodies.length);
+});
+
+test("search and task relevance dim rather than remove", () => {
+  const galaxy = buildGalaxy(synthetic(300, 400), defaultFilters);
+  const none = applyEmphasis(galaxy, "", []);
+  assert(none.every((v) => v === 1));
+  const hub = galaxy.bodies[0];
+  const searched = applyEmphasis(galaxy, hub.name, []);
+  assert.equal(searched.length, galaxy.bodies.length);
+  assert.equal(searched[hub.index], 1);
+  assert(
+    galaxy.bodies.some((b) => searched[b.index] < 1),
+    "non-matching bodies should dim",
+  );
 });
 
 test("file categories separate tests, config and assets from source", () => {

@@ -11,8 +11,10 @@ main.map-mode {
 main.map-mode > * {
   pointer-events: none;
 }
-main.map-mode > * > *,
-main.map-mode .map-workspace * {
+/* Only the direct children of an overlay take pointer events back; a blanket
+   descendant rule here would out-specify the label and tooltip layers and let
+   them swallow every drag, wheel and click meant for the canvas. */
+main.map-mode > * > * {
   pointer-events: auto;
 }
 main.map-mode .map-workspace {
@@ -178,7 +180,7 @@ main.map-mode .notice.error {
 main.map-mode .galaxy-filters {
   top: 200px;
   left: 24px;
-  max-height: calc(100% - 400px);
+  max-height: calc(100% - 232px);
 }
 main.map-mode .component-table {
   inset: 166px 0 0;
@@ -186,6 +188,10 @@ main.map-mode .component-table {
 /* Keep the orbit controls clear of the floating inspector. */
 main.map-mode .galaxy-controls {
   right: 364px;
+}
+.chip[disabled] {
+  opacity: 0.4;
+  pointer-events: none;
 }
 @media (max-width: 1250px) {
   main.map-mode .detail-panel,
@@ -313,70 +319,57 @@ main.map-mode .galaxy-controls {
   border-color: #e8c98d66;
   color: #f4e6c9;
 }
-.galaxy-legend {
-  position: absolute;
-  left: 18px;
-  bottom: 18px;
-  z-index: 4;
-  width: 258px;
-  padding: 12px 14px;
-  border: 1px solid #ffffff14;
-  border-radius: 9px;
-  background: #0e0f13cc;
-  backdrop-filter: blur(10px);
-  color: #a8a294;
-  font-size: 10.5px;
-}
-.galaxy-legend h4 {
-  margin: 0 0 8px;
-  font-size: 10px;
-  letter-spacing: 1.2px;
-  text-transform: uppercase;
-  color: #cbbfa4;
-}
-.galaxy-legend ul {
+.filters-key ul {
   list-style: none;
-  margin: 0 0 8px;
+  margin: 0;
   padding: 0;
   display: grid;
-  gap: 4px;
+  gap: 5px;
+  font-size: 10.5px;
 }
-.galaxy-legend li {
+.filters-key li {
   display: flex;
   align-items: center;
   gap: 7px;
   color: #bdb6a7;
 }
-.galaxy-legend p {
-  margin: 0;
-  line-height: 1.5;
-  color: #857f74;
+.filters-key li em {
+  margin-left: auto;
+  font-style: normal;
+  color: #7d786d;
 }
-.galaxy-legend .dot {
+.filters-note {
+  margin: 2px 0 0;
+  font-size: 10px;
+  line-height: 1.55;
+  color: #7f7a70;
+}
+.dot {
   border-radius: 50%;
   flex-shrink: 0;
 }
-.galaxy-legend .dot.star {
+.dot.star {
   width: 12px;
   height: 12px;
   background: radial-gradient(#fff6dd, #f0c274);
   box-shadow: 0 0 9px #f0c27499;
 }
-.galaxy-legend .dot.planet {
+.dot.planet {
   width: 9px;
   height: 9px;
   background: linear-gradient(140deg, #e8c98d, #8a6f45);
 }
-.galaxy-legend .dot.moon {
+.dot.moon {
   width: 6px;
   height: 6px;
   background: #a8bdd4;
 }
-.galaxy-legend .dot.debris {
+.dot.debris {
   width: 4px;
   height: 4px;
   background: #6d6a63;
 }
+
 .galaxy-fallback {
   display: grid;
   place-content: center;
