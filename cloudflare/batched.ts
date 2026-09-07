@@ -4,10 +4,12 @@ import {
   MAP_PAGE_BOUNDARY_EDGES,
   MAP_PAGE_FILES,
   MAP_PAGE_NODES,
+  type BaselineInputs,
   type ComponentDetail,
   type GalaxyData,
 } from "../src/service.js";
 import { GitHub } from "../src/github.js";
+import { Analytics, batchRunner } from "../src/analytics.js";
 import { CloudStore } from "./store.js";
 import { assert, digest, Fault, redact } from "../src/security.js";
 import {
@@ -180,6 +182,43 @@ export class BatchedService extends Service<CloudStore> {
       }),
       JSON.parse(env.INSTALLATIONS || "{}"),
     );
+    // Migration 0008 owns the analytics schema in D1.
+    this.analytics = new Analytics(batchRunner(env.DB));
+  }
+  /**
+   * Byte counts and relationships for the measured baseline come straight from
+   * the index tables: no snapshot is rehydrated and no source is read.
+   */
+  protected async loadBaselineInputs(
+    p: Principal,
+    t: Task,
+  ): Promise<BaselineInputs> {
+    const j = await this.current(p, t.repoId, t.base);
+    const files = await this.q(
+      "SELECT path,bytes FROM index_files WHERE tenant=? AND job=? LIMIT 20000",
+      p.tenant,
+      j.id,
+    ).all<{ path: string; bytes: number }>();
+    const edges = await this.q(
+      "SELECT src,dst,kind FROM index_edges WHERE tenant=? AND job=? LIMIT 60000",
+      p.tenant,
+      j.id,
+    ).all<{ src: string; dst: string; kind: string }>();
+    return {
+      indexed: new Map(files.results.map((f) => [f.path, f.bytes])),
+      edges: edges.results.map((e) => ({
+        from: e.src,
+        to: e.dst,
+        kind: e.kind,
+      })),
+    };
+  }
+  /**
+   * Tasks live as encrypted objects, so listing them costs one object read
+   * each. The report is bounded to the newest few by construction.
+   */
+  protected async recentTasks(p: Principal, repoId?: string, limit = 25) {
+    return super.recentTasks(p, repoId, limit);
   }
   q(sql: string, ...args: any[]) {
     return this.env.DB.prepare(sql).bind(...args);
@@ -1510,6 +1549,37 @@ export async function advanceIndex(env: Env, tenant: string, id: string) {
           )
           .first<File>();
         if (!f) {
+          const unresolved = await s
+            .q(
+              "SELECT count(*) AS n FROM index_files f WHERE f.tenant=? AND f.job=? AND NOT EXISTS(SELECT 1 FROM index_edges e WHERE e.tenant=f.tenant AND e.job=f.job AND e.src=f.path)",
+              tenant,
+              id,
+            )
+            .first<{ n: number }>();
+          s.note({
+            tenant,
+            surface: "index",
+            operation: "index_repository",
+            repoId: r.id,
+            actor: j.owner ?? "indexer",
+            outcome: "ok",
+            latencyMs: Date.now() - Date.parse(j.created),
+            bytes: j.bytes,
+            detail: {
+              name: r.name,
+              branch: r.branch,
+              revision: j.revision,
+              job: id,
+              files: j.files,
+              done: j.done,
+              excluded: j.excluded,
+              symbols: j.symbols,
+              relationships: j.relationships,
+              withoutOutgoingRelationships: unresolved?.n ?? null,
+              analyzerVersion: j.analyzer_version,
+            },
+          });
+          await s.analytics?.flush();
           await env.DB.batch([
             checkpoint(
               "UPDATE index_jobs SET phase='ready' WHERE tenant=? AND id=?",
@@ -1630,6 +1700,17 @@ export async function advanceIndex(env: Env, tenant: string, id: string) {
       ).run();
     } else {
       const permanent = e instanceof Fault && e.status >= 400 && e.status < 500;
+      s.note({
+        tenant,
+        surface: "index",
+        operation: "index_repository",
+        repoId: j.repo,
+        outcome: "error",
+        status: e instanceof Fault ? e.status : 500,
+        reason: message,
+        detail: { job: id, phase: j.phase, permanent },
+      });
+      await s.analytics?.flush();
       await checkpoint(
         "UPDATE index_jobs SET phase=CASE WHEN ? OR attempts>=4 THEN 'failed' ELSE phase END,attempts=attempts+1,error=? WHERE tenant=? AND id=?",
         permanent ? 1 : 0,

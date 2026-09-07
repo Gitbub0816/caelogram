@@ -17,6 +17,19 @@ import { demoRepository } from "./demo.js";
 import { context } from "./graph.js";
 import type { Principal, Repository, Task, Changeset } from "./types.js";
 const production = process.env.NODE_ENV === "production";
+/**
+ * Collapse identifiers out of a path so routes aggregate. Analytics stores the
+ * shape of the request, never the identifiers embedded in its URL.
+ */
+function routeTemplate(url: string) {
+  return url
+    .replace(/^(\/api\/tools\/[a-z_]+).*$/, "$1")
+    .replace(
+      /^(\/api\/(?:galaxy|component|history|repositories|agent-tokens))\/.+$/,
+      "$1/:id",
+    )
+    .slice(0, 120);
+}
 export function createServer(service: Service, devToken?: string) {
   const app = express();
   app.disable("x-powered-by");
@@ -230,6 +243,32 @@ export function createServer(service: Service, devToken?: string) {
       );
     }
   });
+  // Multi-surface health: one row per authenticated HTTP request, timed at the
+  // edge of the process. Tool calls are recorded separately by dispatch, so
+  // these rows are the transport view — status, latency and route only.
+  app.use(["/api", "/mcp"], (req, res, next) => {
+    const started = Date.now(),
+      url = req.originalUrl.split("?")[0];
+    res.on("finish", () => {
+      const p = res.locals.principal as Principal | undefined;
+      if (!p) return;
+      service.note({
+        tenant: p.tenant,
+        surface: "http",
+        operation: `${req.method} ${routeTemplate(url)}`,
+        actor: p.subject,
+        outcome:
+          res.statusCode < 400
+            ? "ok"
+            : res.statusCode < 500
+              ? "refused"
+              : "error",
+        status: res.statusCode,
+        latencyMs: Date.now() - started,
+      });
+    });
+    next();
+  });
   app.post("/api/tools/:name", async (req, res, next) => {
     try {
       assert(Object.hasOwn(schemas, req.params.name), "Unknown tool", 404);
@@ -239,6 +278,7 @@ export function createServer(service: Service, devToken?: string) {
           res.locals.principal,
           req.params.name as ToolName,
           req.body,
+          "console",
         ),
       );
     } catch (e) {

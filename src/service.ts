@@ -12,6 +12,16 @@ import type {
   Validation,
 } from "./types.js";
 import { assert, digest, redact, safePath, sensitivePath } from "./security.js";
+import {
+  Analytics,
+  BASELINE_ASSUMPTION,
+  ESTIMATE_NOTE,
+  measureBaseline,
+  rollUpEconomics,
+  syncRunner,
+  type AnalyticsEvent,
+  type TaskEconomics,
+} from "./analytics.js";
 import { index, context, impact, tokens, sourceFile, brief } from "./graph.js";
 export type GalaxyNode = {
   path: string;
@@ -111,6 +121,11 @@ export function fitPage<
   }
   return page;
 }
+/** Indexed byte counts and static relationships at one exact commit. */
+export interface BaselineInputs {
+  indexed: Map<string, number>;
+  edges: { from: string; to: string; kind: string }[];
+}
 export const editSchema = z.object({
   path: z.string().min(1).max(400),
   content: z.string().max(256000).nullable(),
@@ -125,12 +140,42 @@ export class Service<S extends Storage = Store> {
     return undefined;
   }
   publishing = new Set<string>();
+  /**
+   * Analytics capture. Optional by construction: a service without a sink
+   * behaves identically, and a sink that fails only loses rows.
+   */
+  analytics?: Analytics;
   constructor(
     public store: S,
     public provider: Provider,
     public installations?: Record<string, number[]>,
     public indexLimits?: { maxNodes: number; maxEdges: number },
-  ) {}
+  ) {
+    // The local adapter has no migration of its own, so the sync runner creates
+    // the analytics tables lazily on first write. A D1 handle also exposes
+    // `prepare`, so it is excluded by its `batch` method: D1 is wired up by
+    // BatchedService with the async runner and migration 0008 instead.
+    const db = (this.store as unknown as { db?: any }).db;
+    if (
+      db &&
+      typeof db.prepare === "function" &&
+      typeof db.batch !== "function"
+    )
+      this.analytics = new Analytics(syncRunner(db));
+  }
+  /**
+   * Record one analytics event. Synchronous, best effort, and structurally
+   * incapable of failing a request: the buffer append is wrapped, the flush is
+   * never awaited, and a failed write is counted rather than thrown.
+   */
+  note(event: AnalyticsEvent) {
+    try {
+      this.analytics?.record(event);
+      this.analytics?.schedule();
+    } catch {
+      /* analytics must never affect the request */
+    }
+  }
   allowed(p: Principal, scope: string, repo?: string) {
     assert(
       p.scopes.includes(scope) || p.scopes.includes("admin"),
@@ -170,6 +215,7 @@ export class Service<S extends Storage = Store> {
     installationId: number,
   ) {
     this.allowed(p, "admin", name);
+    const started = Date.now();
     const installations =
       this.installations ??
       JSON.parse(process.env.CAELOGRAM_INSTALLATIONS ?? "{}");
@@ -207,6 +253,37 @@ export class Service<S extends Storage = Store> {
     });
     await this.store.put(p.tenant, "repo", repo);
     await this.store.audit(p.tenant, p.subject, "repository.indexed", repo.id);
+    this.note({
+      tenant: p.tenant,
+      surface: "index",
+      operation: "index_repository",
+      repoId: repo.id,
+      actor: p.subject,
+      outcome: "ok",
+      latencyMs: Date.now() - started,
+      bytes: graph.files.reduce((n, f) => n + f.content.length, 0),
+      detail: {
+        name,
+        branch,
+        revision: graph.revision,
+        files: graph.files.length,
+        parsed: graph.parsed,
+        reused: graph.reused,
+        symbols: graph.nodes.filter((n) => n.kind !== "file").length,
+        relationships: graph.edges.filter((e) => e.kind !== "contains").length,
+        excluded: graph.nodes.filter((n) => n.exclusionReason).length,
+        unresolved: graph.warnings.filter((w) =>
+          w.includes("unresolved import"),
+        ).length,
+        exclusionReasons: [
+          ...new Set(
+            graph.nodes
+              .map((n) => n.exclusionReason)
+              .filter((r): r is string => Boolean(r)),
+          ),
+        ].slice(0, 10),
+      },
+    });
     return this.summary(repo);
   }
   summary(r: Repository) {
@@ -714,6 +791,22 @@ export class Service<S extends Storage = Store> {
       c.status = "published";
       await this.store.put(p.tenant, "change", c);
       await this.store.audit(p.tenant, p.subject, "changeset.published", c.id);
+      this.note({
+        tenant: p.tenant,
+        surface: "github",
+        operation: "pull_request_opened",
+        repoId: r.id,
+        taskId: c.taskId,
+        actor: p.subject,
+        outcome: "ok",
+        detail: {
+          repository: r.name,
+          number: c.pr.number,
+          installationId: r.installationId,
+          changesetId: c.id,
+          taskId: c.taskId,
+        },
+      });
       return c;
     } finally {
       this.publishing.delete(lock);
@@ -734,6 +827,221 @@ export class Service<S extends Storage = Store> {
         await this.store.remove(p.tenant, "snapshot", s.id);
     await this.store.remove(p.tenant, "repo", id);
     await this.store.audit(p.tenant, p.subject, "repository.deleted", id);
+    // Analytics is derived data about a repository the workspace just deleted;
+    // the append-only audit trail is the record that survives.
+    await this.analytics?.forgetRepository(p.tenant, id);
     return { deleted: true, auditRetained: true };
+  }
+
+  // ------------------------------------------------------------- analytics
+
+  /**
+   * Indexed byte counts and static relationships at a task's base commit —
+   * the two inputs the measured baseline needs. The cloud adapter overrides
+   * this to read them from D1 instead of rehydrating a whole snapshot.
+   */
+  private baselineCache = new Map<string, BaselineInputs>();
+  async baselineInputs(p: Principal, t: Task): Promise<BaselineInputs> {
+    const key = `${p.tenant}:${t.repoId}:${t.base}`;
+    // One report covers many tasks against the same commit; read it once.
+    const cached = this.baselineCache.get(key);
+    if (cached) return cached;
+    const loaded = await this.loadBaselineInputs(p, t);
+    this.baselineCache.set(key, loaded);
+    return loaded;
+  }
+  protected async loadBaselineInputs(
+    p: Principal,
+    t: Task,
+  ): Promise<BaselineInputs> {
+    const g = await this.graph(p, t);
+    return {
+      indexed: new Map(
+        g.files.map((f) => [f.path, Buffer.byteLength(f.content, "utf8")]),
+      ),
+      edges: g.edges,
+    };
+  }
+
+  /**
+   * Token economics for one task, against a measured naive baseline: the files
+   * the change actually touched plus their static dependency closure. Never
+   * the whole repository, and never a number when the inputs cannot justify
+   * one.
+   */
+  async economics(
+    p: Principal,
+    t: Task,
+    changesets: Changeset[],
+    states: Map<string, { state: string; hoursToMerge: number | null }>,
+    repoName?: string,
+  ): Promise<TaskEconomics> {
+    const mine = changesets
+      .filter((c) => c.taskId === t.id)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    const published = mine.filter((c) => c.status === "published");
+    const chosen = published.at(-1) ?? mine.at(-1);
+    let basis: "merged" | "published" | "submitted" | "none" = "none";
+    if (chosen?.status === "published") {
+      const key = `${repoName ?? ""}#${chosen.pr?.number}`;
+      basis = states.get(key)?.state === "merged" ? "merged" : "published";
+    } else if (chosen) basis = "submitted";
+    const served = Math.max(t.spent ?? 0, t.context?.estimatedTokens ?? 0);
+    if (!chosen)
+      return measureBaseline({
+        taskId: t.id,
+        repoId: t.repoId,
+        base: t.base,
+        createdAt: t.createdAt,
+        servedTokens: served,
+        touched: [],
+        indexed: new Map(),
+        edges: [],
+        basis: "none",
+      });
+    const inputs = await this.baselineInputs(p, t).catch(() => ({
+      indexed: new Map<string, number>(),
+      edges: [] as { from: string; to: string; kind: string }[],
+    }));
+    return measureBaseline({
+      taskId: t.id,
+      repoId: t.repoId,
+      base: t.base,
+      createdAt: t.createdAt,
+      servedTokens: served,
+      touched: chosen.edits.map((e) => e.path),
+      indexed: inputs.indexed,
+      edges: inputs.edges,
+      basis,
+    });
+  }
+
+  /**
+   * Ask GitHub for the current state of the draft pull requests this workspace
+   * opened, and record what it says. Bounded, best effort, and never fatal:
+   * without it, merge state stays honestly unknown.
+   */
+  async refreshPullRequests(p: Principal, limit = 20) {
+    const api = (this.provider as unknown as { api?: Function }).api;
+    if (!this.analytics || typeof api !== "function") return 0;
+    let refreshed = 0;
+    for (const pr of await this.analytics.openPullRequests(p.tenant, limit)) {
+      try {
+        const data: any = await api.call(
+          this.provider,
+          pr.repository,
+          pr.installationId,
+          `/pulls/${pr.number}`,
+        );
+        const state = data?.merged_at
+          ? "merged"
+          : data?.state === "closed"
+            ? "closed"
+            : "open";
+        const hours =
+          data?.merged_at && data?.created_at
+            ? (Date.parse(data.merged_at) - Date.parse(data.created_at)) /
+              3600000
+            : null;
+        this.note({
+          tenant: p.tenant,
+          surface: "github",
+          operation: "pull_request_state",
+          repoId: pr.repoId,
+          taskId: pr.taskId,
+          actor: p.subject,
+          outcome: "ok",
+          detail: {
+            repository: pr.repository,
+            number: pr.number,
+            state,
+            hoursToMerge: hours,
+            taskId: pr.taskId,
+          },
+        });
+        refreshed++;
+      } catch (e) {
+        this.note({
+          tenant: p.tenant,
+          surface: "github",
+          operation: "pull_request_state",
+          repoId: pr.repoId,
+          outcome: "error",
+          reason: e instanceof Error ? e.message : "GitHub lookup failed",
+          detail: { repository: pr.repository, number: pr.number },
+        });
+      }
+    }
+    await this.analytics.flush();
+    return refreshed;
+  }
+
+  /** Most recent tasks in scope, newest first. Bounded on purpose. */
+  protected async recentTasks(p: Principal, repoId?: string, limit = 25) {
+    return (await this.store.list<Task>(p.tenant, "task"))
+      .filter((t) => !repoId || t.repoId === repoId)
+      .sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""))
+      .slice(0, limit);
+  }
+
+  /**
+   * The whole analytics report for one workspace: token economics against a
+   * measured baseline, agent behaviour, outcomes, index health and per-surface
+   * performance. Scoped to exactly one tenant; `repoId` resolves the workspace
+   * that owns the repository first.
+   */
+  async report(
+    p: Principal,
+    options: { repoId?: string; days?: number; refresh?: boolean } = {},
+  ) {
+    this.allowed(p, "read");
+    let repoName: string | undefined;
+    if (options.repoId) {
+      const r = await this.repo(p, options.repoId);
+      repoName = r.name;
+    }
+    const header = {
+      workspace: p.tenant,
+      repoId: options.repoId ?? null,
+      repository: repoName ?? null,
+      estimate: ESTIMATE_NOTE,
+      assumption: BASELINE_ASSUMPTION,
+    };
+    if (!this.analytics)
+      return {
+        ...header,
+        available: false,
+        reason:
+          "No analytics store is configured for this deployment, so nothing has been captured. No figure is shown rather than an invented one.",
+      };
+    if (options.refresh) await this.refreshPullRequests(p);
+    // Everything buffered by this request is on disk before it is read back.
+    await this.analytics.flush();
+    const aggregate = await this.analytics.aggregate(p.tenant, {
+      repoId: options.repoId,
+      days: options.days,
+    });
+    const states = await this.analytics.pullRequestStates(p.tenant);
+    const tasks = await this.recentTasks(p, options.repoId);
+    const changesets = await Promise.resolve(
+      this.store.list<Changeset>(p.tenant, "change"),
+    ).catch(() => [] as Changeset[]);
+    const economics: TaskEconomics[] = [];
+    for (const t of tasks) {
+      const one = await this.economics(
+        p,
+        t,
+        changesets,
+        states,
+        repoName,
+      ).catch(() => null);
+      if (one) economics.push(one);
+    }
+    return {
+      ...header,
+      available: true,
+      ...aggregate,
+      economics: { tasks: economics, totals: rollUpEconomics(economics) },
+    };
   }
 }
