@@ -15,4 +15,5 @@ createRoot(document.getElementById("root")!).render(
 );
 
 import "./orbit.css";
+import "./galaxy.css";
 import "./auth.css";

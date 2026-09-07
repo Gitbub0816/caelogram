@@ -1,4 +1,4 @@
-import { Service } from "../src/service.js";
+import { Service, type GalaxyData } from "../src/service.js";
 import { GitHub } from "../src/github.js";
 import { CloudStore } from "./store.js";
 import { assert, digest, Fault, redact } from "../src/security.js";
@@ -12,6 +12,8 @@ import type {
 } from "../src/types.js";
 import type { Env } from "./worker.js";
 import { availableRepositories } from "./onboarding.js";
+const GALAXY_NODE_LIMIT = 20000,
+  GALAXY_EDGE_LIMIT = 60000;
 import { posix } from "node:path";
 import {
   ANALYZER_VERSION,
@@ -465,6 +467,59 @@ export class BatchedService extends Service<CloudStore> {
       id,
     ).first();
     return r ? this.mapPage(p, id) : super.map(p, id);
+  }
+  // Whole-repository galaxy. Reads only the columns the visualisation needs so
+  // a 2,000+ file index fits in one response: file metadata blobs are never
+  // touched, and edges come back index-encoded.
+  async galaxy(p: Principal, id: string): Promise<GalaxyData> {
+    const record = await this.q(
+      "SELECT id FROM index_repos WHERE tenant=? AND id=?",
+      p.tenant,
+      id,
+    ).first();
+    if (!record) return super.galaxy(p, id);
+    const j = await this.current(p, id),
+      r = await this.record(p, id);
+    const files = await this.q(
+      "SELECT path,bytes FROM index_files WHERE tenant=? AND job=? ORDER BY path LIMIT ?",
+      p.tenant,
+      j.id,
+      GALAXY_NODE_LIMIT + 1,
+    ).all<{ path: string; bytes: number }>();
+    const truncated = files.results.length > GALAXY_NODE_LIMIT;
+    const rows = truncated
+      ? files.results.slice(0, GALAXY_NODE_LIMIT)
+      : files.results;
+    const order = new Map(rows.map((f, i) => [f.path, i] as const));
+    const links = await this.q(
+      "SELECT src,dst,kind FROM index_edges WHERE tenant=? AND job=? LIMIT ?",
+      p.tenant,
+      j.id,
+      GALAXY_EDGE_LIMIT,
+    ).all<{ src: string; dst: string; kind: string }>();
+    const kinds: string[] = [];
+    const edges: [number, number, number][] = [];
+    for (const e of links.results) {
+      const from = order.get(e.src),
+        to = order.get(e.dst);
+      if (from === undefined || to === undefined || from === to) continue;
+      let k = kinds.indexOf(e.kind);
+      if (k < 0) k = kinds.push(e.kind) - 1;
+      edges.push([from, to, k]);
+    }
+    return {
+      ...(await this.summaryRecord(r)),
+      nodes: rows.map((f) => ({
+        path: f.path,
+        name: f.path.slice(f.path.lastIndexOf("/") + 1),
+        symbols: 0,
+        bytes: f.bytes,
+        excluded: false,
+      })),
+      edges,
+      kinds,
+      truncated,
+    };
   }
   async boundedGraph(
     p: Principal,

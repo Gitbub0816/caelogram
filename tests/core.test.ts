@@ -379,3 +379,33 @@ test("serialized context including explanation and omission metadata remains bou
     assert(c.omittedCount >= c.omitted.length);
   }
 });
+test("whole-repository galaxy carries every file and index-encoded relationships", async () => {
+  const { service, repo } = await setup();
+  const paged = await service.map(p, repo.id);
+  const galaxy = await service.galaxy(p, repo.id);
+  const fileNodes = paged.nodes.filter((n) => n.kind === "file");
+  assert.equal(galaxy.nodes.length, fileNodes.length);
+  assert.deepEqual(
+    galaxy.nodes.map((n) => n.path).sort(),
+    fileNodes.map((n) => n.path).sort(),
+  );
+  // Symbol counts and file sizes ride along so the view needs no second call.
+  assert(galaxy.nodes.some((n) => n.symbols > 0 && n.bytes > 0));
+  // Edges are index pairs into `nodes`, and never the containment edges.
+  const real = paged.edges.filter((e) => e.kind !== "contains");
+  assert.equal(galaxy.edges.length, real.length);
+  for (const [from, to, kind] of galaxy.edges) {
+    assert(galaxy.nodes[from] && galaxy.nodes[to] && from !== to);
+    assert(galaxy.kinds[kind]);
+  }
+  assert(
+    galaxy.edges.some(
+      ([from, to, kind]) =>
+        galaxy.nodes[from].path === "src/checkout.ts" &&
+        galaxy.nodes[to].path === "src/payments.ts" &&
+        galaxy.kinds[kind] === "imports",
+    ),
+  );
+  assert.equal(galaxy.truncated, false);
+  assert.equal(galaxy.revision, paged.revision);
+});

@@ -8,7 +8,6 @@ import {
   useClerk,
 } from "@clerk/react";
 import App from "./App";
-import { Icon } from "./Icon";
 
 export type Identity = {
   signedIn: boolean;
@@ -67,7 +66,7 @@ function SessionApp() {
     return (
       <div className="auth-page">
         <a className="auth-brand" href="/">
-          <Icon /> caelogram
+          <img src="/logo.png" alt="caelogram" />
         </a>
         <div className="auth-layout">
           <section>
