@@ -186,6 +186,10 @@ program
   .command("sync <repoId>")
   .action(async (repoId) => print(await call("sync_repository", { repoId })));
 program
+  .command("index-status <repoId>")
+  .description("Show background indexing progress for a connected repository")
+  .action(async (repoId) => print(await call("index_status", { repoId })));
+program
   .command("status")
   .action(async () => print(await call("list_repositories", {})));
 program

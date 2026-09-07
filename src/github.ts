@@ -22,7 +22,10 @@ export interface Provider {
   ): Promise<{ url: string; number: number; branch: string }>;
 }
 export class GitHub implements Provider {
-  constructor(private credentials?: { appId: string; privateKey: string }, private sourceBudget = 25_000_000) {}
+  constructor(
+    private credentials?: { appId: string; privateKey: string },
+    private sourceBudget = 25_000_000,
+  ) {}
   private auth?: ReturnType<typeof createAppAuth>;
   async api(
     name: string,
@@ -64,6 +67,25 @@ export class GitHub implements Provider {
       body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(30000),
     });
+    if (
+      res.status === 429 ||
+      (res.status === 403 && res.headers.get("x-ratelimit-remaining") === "0")
+    ) {
+      const error = new Fault(
+        429,
+        "GitHub rate limit reached; indexing will resume automatically.",
+      );
+      error.retryAfterSeconds = Math.min(
+        3600,
+        Math.max(
+          60,
+          Number(res.headers.get("retry-after")) ||
+            Number(res.headers.get("x-ratelimit-reset")) - Date.now() / 1000 ||
+            60,
+        ),
+      );
+      throw error;
+    }
     if (!res.ok)
       throw new Fault(
         res.status === 404 ? 404 : 502,
@@ -140,7 +162,12 @@ export class GitHub implements Provider {
         )),
       );
     }
-    assert(files.reduce((sum, file) => sum + Buffer.byteLength(file.content), 0) <= this.sourceBudget, "Downloaded source exceeds runtime budget", 413);
+    assert(
+      files.reduce((sum, file) => sum + Buffer.byteLength(file.content), 0) <=
+        this.sourceBudget,
+      "Downloaded source exceeds runtime budget",
+      413,
+    );
     return { revision, files };
   }
   async publish(

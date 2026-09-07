@@ -24,6 +24,7 @@ export function index(
   revision: string,
   previous?: Graph,
   limits?: { maxNodes: number; maxEdges: number },
+  onImport?: (specifier: string) => void,
 ): Graph {
   const nodes: Component[] = [],
     edges: Relation[] = [],
@@ -43,7 +44,12 @@ export function index(
   ) => edges.push({ from, to, kind, evidence, confidence, revision });
   for (const file of selected) {
     const source = code.test(file.path)
-      ? ts.createSourceFile(file.path, file.content, ts.ScriptTarget.Latest, false)
+      ? ts.createSourceFile(
+          file.path,
+          file.content,
+          ts.ScriptTarget.Latest,
+          false,
+        )
       : undefined;
     const old = previous?.files.find(
       (f) => f.path === file.path && f.sha === file.sha,
@@ -94,7 +100,10 @@ export function index(
           }
           ts.forEachChild(n, visit);
           if (limits && nodes.length > limits.maxNodes)
-            throw new Fault(413, "Hosted symbol budget exceeded; no partial index was published. Use caelogram map locally.");
+            throw new Fault(
+              413,
+              "Hosted symbol budget exceeded; no partial index was published. Use caelogram map locally.",
+            );
         };
         visit(source);
       }
@@ -106,6 +115,7 @@ export function index(
     if (!source) continue;
     // Always resolve imports against the new file set: a newly added module can resolve an old import.
     const resolve = (specifier: string) => {
+      onImport?.(specifier);
       if (!specifier.startsWith(".")) {
         if (specifier.startsWith("@") || specifier.startsWith("~"))
           warnings.push(
@@ -160,7 +170,10 @@ export function index(
     };
     visit(source);
     if (limits && edges.length > limits.maxEdges)
-      throw new Fault(413, "Hosted relationship budget exceeded; no partial index was published. Use caelogram map locally.");
+      throw new Fault(
+        413,
+        "Hosted relationship budget exceeded; no partial index was published. Use caelogram map locally.",
+      );
   }
   if (files.length !== selected.length)
     warnings.push(

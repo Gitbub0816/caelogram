@@ -17,6 +17,8 @@ export default function Connect({
     [branch, setBranch] = useState(""),
     [busy, setBusy] = useState(false),
     [error, setError] = useState("");
+  const [progress, setProgress] = useState<any>(null);
+  const [tracking, setTracking] = useState("");
   async function api(path: string, body?: unknown) {
     const token = await identity?.getToken();
     const r = await fetch(path, {
@@ -52,6 +54,39 @@ export default function Connect({
   useEffect(() => {
     if (identity?.signedIn) void refresh();
   }, [identity?.signedIn]);
+  useEffect(() => {
+    if (!tracking) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      try {
+        const next = await api("/api/tools/index_status", { repoId: tracking });
+        if (stopped) return;
+        setProgress(next);
+        if (next.status === "ready") {
+          setTracking("");
+          await onMapped(tracking);
+          return;
+        }
+        if (next.status === "failed") {
+          setTracking("");
+          setError(next.error || "Indexing failed");
+          return;
+        }
+      } catch (e) {
+        if (!stopped)
+          setError(
+            e instanceof Error ? e.message : "Unable to refresh progress",
+          );
+      }
+      if (!stopped) timer = setTimeout(() => void poll(), 3000);
+    };
+    void poll();
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }, [tracking]);
   return (
     <section className="page narrow">
       <h1>Connect your GitHub</h1>
@@ -138,7 +173,11 @@ export default function Connect({
                   branch,
                   installationId: repo.installationId,
                 });
-                await onMapped(x.id);
+                if (x.status === "ready") await onMapped(x.id);
+                else {
+                  setProgress(x);
+                  setTracking(x.id);
+                }
               });
             }}
           >
@@ -178,7 +217,10 @@ export default function Connect({
                 maxLength={200}
               />
             </label>
-            <button className="primary" disabled={busy || !choice}>
+            <button
+              className="primary"
+              disabled={busy || !!tracking || !choice}
+            >
               {busy ? "Working…" : "Map repository"}
             </button>
             {!repos.length && (
@@ -188,6 +230,58 @@ export default function Connect({
               </p>
             )}
           </form>
+          {progress && (
+            <section className="connect-step" aria-live="polite">
+              <h2>
+                {progress.status === "discovering"
+                  ? "Discovering files"
+                  : progress.status === "indexing"
+                    ? "Indexing source"
+                    : progress.status === "resolving"
+                      ? "Resolving relationships"
+                      : progress.status === "ready"
+                        ? "Map ready"
+                        : "Indexing stopped"}
+              </h2>
+              <p>
+                {progress.name} · commit {progress.revision?.slice(0, 8)}
+              </p>
+              {progress.status === "discovering" ? (
+                <progress aria-label="Discovering repository" />
+              ) : (
+                <progress
+                  aria-label="Indexing progress"
+                  max={Math.max(1, progress.files)}
+                  value={
+                    progress.status === "resolving"
+                      ? progress.resolved
+                      : progress.processed
+                  }
+                />
+              )}
+              <p>
+                {progress.status === "resolving"
+                  ? progress.resolved
+                  : progress.processed}{" "}
+                / {progress.files} files ·{" "}
+                {(progress.sourceBytes / 1_000_000).toFixed(1)} MB discovered ·{" "}
+                {progress.excluded} excluded entries
+              </p>
+              <p>
+                Progress is saved in the cloud. You can close this page and
+                return to the repository below.
+              </p>
+              {progress.error && <p role="status">{progress.error}</p>}
+              {progress.previousMapAvailable && (
+                <button
+                  className="secondary"
+                  onClick={() => void act(() => onMapped(progress.id))}
+                >
+                  Open previous complete map
+                </button>
+              )}
+            </section>
+          )}
           {!!connected.length && (
             <div className="repo-list">
               <h2>Your indexed repositories</h2>
@@ -195,7 +289,18 @@ export default function Connect({
                 <button
                   key={r.id}
                   disabled={busy}
-                  onClick={() => void act(() => onMapped(r.id))}
+                  onClick={() =>
+                    void act(async () => {
+                      const next = await api("/api/tools/index_status", {
+                        repoId: r.id,
+                      });
+                      if (next.status === "ready") await onMapped(r.id);
+                      else {
+                        setProgress(next);
+                        setTracking(r.id);
+                      }
+                    })
+                  }
                 >
                   {r.name}
                   <span>{r.branch}</span>

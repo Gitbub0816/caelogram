@@ -952,6 +952,57 @@ export default function App({
                 </div>
               </div>
               <div className="map-workspace">
+                {!demo && data.visibleFiles !== undefined && (
+                  <div className="notice">
+                    <p>
+                      Showing {data.visibleFiles} of {data.files} indexed files.
+                      Connections to other pages are outside this view.
+                    </p>
+                    <button
+                      onClick={() =>
+                        void act("Searching map", async () =>
+                          setData(
+                            await tool("map_page", {
+                              repoId: data.id,
+                              query: search,
+                            }),
+                          ),
+                        )
+                      }
+                    >
+                      Search all indexed paths
+                    </button>
+                    {data.nextCursor && (
+                      <button
+                        onClick={() =>
+                          void act("Loading map page", async () => {
+                            setData(
+                              await tool("map_page", {
+                                repoId: data.id,
+                                after: data.nextCursor,
+                                query: search,
+                              }),
+                            );
+                            setSelected("");
+                          })
+                        }
+                      >
+                        Next files
+                      </button>
+                    )}
+                    <button
+                      onClick={() =>
+                        void act("Loading map", async () => {
+                          setData(await tool("map_page", { repoId: data.id }));
+                          setSearch("");
+                          setSelected("");
+                        })
+                      }
+                    >
+                      First files
+                    </button>
+                  </div>
+                )}
                 <section className="map-panel">
                   <div className="map-toolbar">
                     <div className="segmented" aria-label="Map view">

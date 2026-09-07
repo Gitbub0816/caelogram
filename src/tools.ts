@@ -12,6 +12,12 @@ export const schemas = {
     installationId: z.number().int().positive(),
   }),
   repository_map: z.object({ repoId: z.string() }),
+  index_status: z.object({ repoId: z.string() }),
+  map_page: z.object({
+    repoId: z.string(),
+    after: z.string().max(400).default(""),
+    query: z.string().max(200).default(""),
+  }),
   begin_change: z.object({
     repoId: z.string(),
     prompt: z.string().min(3).max(4000),
@@ -54,6 +60,10 @@ export const schemas = {
 };
 export type ToolName = keyof typeof schemas;
 const descriptions: Record<ToolName, string> = {
+  index_status:
+    "Get durable indexing phase, file and byte progress, exclusions and failure details.",
+  map_page:
+    "Get at most 50 files of a revision map; use nextCursor or a path query for other areas.",
   list_repositories: "List repositories accessible to this identity.",
   connect_repository:
     "Index an EXISTING GitHub repository and branch through a tenant-bound GitHub App installation. Does not modify the repository.",
@@ -87,6 +97,8 @@ export async function dispatch(
   name: ToolName,
   input: unknown,
 ) {
+  const custom = await service.customTool(p, name, schemas[name].parse(input));
+  if (custom) return custom.result;
   const store = service.store as Storage & {
     exclusive?: <T>(tenant: string, run: () => Promise<T>) => Promise<T>;
   };
@@ -111,6 +123,12 @@ async function execute(
   if (!(name in schemas)) throw new Error("Unknown tool");
   const a: any = schemas[name].parse(input);
   switch (name) {
+    case "index_status": {
+      const r = await service.repo(p, a.repoId);
+      return service.summary(r);
+    }
+    case "map_page":
+      return service.map(p, a.repoId);
     case "list_repositories":
       return await service.list(p);
     case "connect_repository":

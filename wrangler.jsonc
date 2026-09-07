@@ -23,6 +23,17 @@
   ],
   "r2_buckets": [{ "binding": "SOURCE", "bucket_name": "caelogram-private" }],
   "triggers": { "crons": ["* * * * *"] },
+  "queues": {
+    "producers": [{ "binding": "INDEX_QUEUE", "queue": "caelogram-index" }],
+    "consumers": [
+      {
+        "queue": "caelogram-index",
+        "max_batch_size": 1,
+        "max_concurrency": 1,
+        "max_retries": 5,
+      },
+    ],
+  },
   "observability": { "enabled": true },
   "limits": { "cpu_ms": 30000 },
   "ratelimits": [

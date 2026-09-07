@@ -11,6 +11,7 @@ import { assert, Fault, constantEqual } from "../src/security.js";
 import type { Principal, Task, Changeset, Repository } from "../src/types.js";
 import { CloudStore } from "./store.js";
 import { errorDetails } from "./errors.js";
+import { BatchedService, advanceIndex } from "./batched.js";
 import {
   clerkIdentity,
   clerkIssuer,
@@ -24,6 +25,7 @@ import {
   listAgentTokens,
 } from "./agent-tokens.js";
 export interface Env {
+  INDEX_QUEUE?: Queue<{ tenant: string; job: string }>;
   CLERK_ISSUER?: string;
   CLERK_PUBLISHABLE_KEY?: string;
   GITHUB_CLIENT_ID: string;
@@ -45,15 +47,7 @@ export interface Env {
 }
 const jwksCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 function service(env: Env) {
-  return new Service(
-    new CloudStore(env.DB, env.SOURCE, env.DATA_KEY),
-    new GitHub({
-      appId: env.GITHUB_APP_ID,
-      privateKey: env.GITHUB_PRIVATE_KEY,
-    }, 8_000_000),
-    JSON.parse(env.INSTALLATIONS || "{}"),
-    { maxNodes: 20000, maxEdges: 40000 },
-  );
+  return new BatchedService(env);
 }
 function clerkOriginForCsp(env: Env) {
   try {
@@ -259,7 +253,7 @@ async function route(req: Request, env: Env): Promise<Response> {
   if (path.startsWith("/api/") || path === "/mcp") {
     const p = await principal(req, env),
       s = service(env);
-    if (env.CLERK_ISSUER) {
+    if (env.CLERK_ISSUER || env.CLERK_PUBLISHABLE_KEY) {
       if (
         path.startsWith("/api/github/") ||
         path.startsWith("/api/agent-tokens") ||
@@ -282,7 +276,15 @@ async function route(req: Request, env: Env): Promise<Response> {
       // Owners can delete their retained data even after GitHub access is revoked.
       if (path.startsWith("/api/repositories/") && req.method === "DELETE") {
         const id = decodeURIComponent(path.slice(18));
-        const repo = await s.store.get<Repository>(p.tenant, "repo", id);
+        const repo =
+          (await s
+            .q(
+              "SELECT name FROM index_repos WHERE tenant=? AND id=?",
+              p.tenant,
+              id,
+            )
+            .first<{ name: string }>()) ||
+          (await s.store.get<Repository>(p.tenant, "repo", id));
         return reply(
           await s.store.exclusive(p.tenant, () =>
             s.remove({ ...p, repositories: [repo.name] }, id),
@@ -396,6 +398,16 @@ async function route(req: Request, env: Env): Promise<Response> {
   return env.ASSETS.fetch(req);
 }
 export async function processCloudJobs(env: Env) {
+  const pending = await env.DB.prepare(
+    "SELECT tenant,id FROM index_jobs WHERE phase IN ('discovering','indexing','resolving','deleting') AND lease<? ORDER BY created LIMIT 5",
+  )
+    .bind(Date.now())
+    .all<{ tenant: string; id: string }>();
+  for (const job of pending.results) {
+    if (env.INDEX_QUEUE)
+      await env.INDEX_QUEUE.send({ tenant: job.tenant, job: job.id });
+    else await advanceIndex(env, job.tenant, job.id);
+  }
   await env.DB.prepare("DELETE FROM oauth_states WHERE expires<?")
     .bind(Date.now())
     .run();
@@ -414,6 +426,47 @@ export async function processCloudJobs(env: Env) {
           rows = await env.DB.prepare(
             "SELECT DISTINCT tenant FROM objects WHERE kind='repo'",
           ).all<{ tenant: string }>();
+        const batched = await s
+          .q(
+            "SELECT * FROM index_repos WHERE name=? AND installation=?",
+            event.name,
+            event.installationId,
+          )
+          .all<{
+            tenant: string;
+            name: string;
+            branch: string;
+            installation: number;
+          }>();
+        for (const repo of batched.results) {
+          if (event.ref !== `refs/heads/${repo.branch}`) continue;
+          const grants = repo.tenant.startsWith("user:")
+            ? await availableRepositories(s.store, repo.tenant, env)
+            : [];
+          if (
+            repo.tenant.startsWith("user:") &&
+            !grants.some(
+              (g) =>
+                g.name === repo.name && g.installationId === repo.installation,
+            )
+          )
+            continue;
+          s.installations = {
+            ...s.installations,
+            [repo.tenant]: [repo.installation],
+          };
+          await s.connect(
+            {
+              tenant: repo.tenant,
+              subject: "github-webhook",
+              scopes: ["admin"],
+              repositories: [repo.name],
+            },
+            repo.name,
+            repo.branch,
+            repo.installation,
+          );
+        }
         for (const { tenant } of rows.results) {
           if (tenant.startsWith("user:") && env.CLERK_ISSUER) {
             const repos = (
@@ -493,20 +546,45 @@ export async function processCloudJobs(env: Env) {
   });
 }
 export default {
+  async queue(batch: MessageBatch<unknown>, env: Env) {
+    for (const message of batch.messages) {
+      try {
+        const body = z
+          .object({ tenant: z.string(), job: z.string() })
+          .parse(message.body);
+        await advanceIndex(env, body.tenant, body.job);
+        message.ack();
+      } catch (e) {
+        console.error(
+          JSON.stringify({
+            event: "index.failed",
+            errors: errorDetails(e, env),
+          }),
+        );
+        message.retry({ delaySeconds: 30 });
+      }
+    }
+  },
   async fetch(req: Request, env: Env) {
     const requestId = crypto.randomUUID();
     let response: Response;
     try {
       response = await route(req, env);
     } catch (e) {
-      console.error(JSON.stringify({
-        event: "request.failed",
-        requestId,
-        method: req.method,
-        path: new URL(req.url).pathname,
-        status: e instanceof Fault ? e.status : e instanceof z.ZodError ? 400 : 500,
-        errors: e instanceof z.ZodError ? [{ name: "ZodError", message: "Invalid request fields" }] : errorDetails(e, env),
-      }));
+      console.error(
+        JSON.stringify({
+          event: "request.failed",
+          requestId,
+          method: req.method,
+          path: new URL(req.url).pathname,
+          status:
+            e instanceof Fault ? e.status : e instanceof z.ZodError ? 400 : 500,
+          errors:
+            e instanceof z.ZodError
+              ? [{ name: "ZodError", message: "Invalid request fields" }]
+              : errorDetails(e, env),
+        }),
+      );
       response = reply(
         {
           requestId,

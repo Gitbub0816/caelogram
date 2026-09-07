@@ -19,6 +19,13 @@ export const editSchema = z.object({
 });
 import type { Storage } from "./storage.js";
 export class Service<S extends Storage = Store> {
+  async customTool(
+    _p: Principal,
+    _name: string,
+    _input: any,
+  ): Promise<{ result: any } | undefined> {
+    return undefined;
+  }
   publishing = new Set<string>();
   constructor(
     public store: S,
@@ -82,7 +89,12 @@ export class Service<S extends Storage = Store> {
       installationId,
       existing?.graph.files,
     );
-    const graph = index(snap.files, snap.revision, existing?.graph, this.indexLimits);
+    const graph = index(
+      snap.files,
+      snap.revision,
+      existing?.graph,
+      this.indexLimits,
+    );
     const repo: Repository = {
       id: existing?.id ?? randomUUID(),
       name,

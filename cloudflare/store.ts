@@ -143,12 +143,6 @@ export class CloudStore implements Storage {
     ).results;
   }
   async exclusive<T>(tenant: string, run: () => Promise<T>): Promise<T> {
-    // A terminated isolate cannot execute `finally`. Reclaim only expired leases;
-    // active mutations retain exclusive ownership.
-    await this.db
-      .prepare("DELETE FROM locks WHERE tenant=? AND acquired<?")
-      .bind(tenant, new Date(Date.now() - 10 * 60_000).toISOString())
-      .run();
     const owner = crypto.randomUUID();
     const lock = await this.db
       .prepare("INSERT OR IGNORE INTO locks VALUES(?,?,?)")
@@ -156,7 +150,7 @@ export class CloudStore implements Storage {
       .run();
     assert(
       lock.meta.changes === 1,
-      "Another repository operation is in progress. Locks from terminated Workers recover automatically after ten minutes.",
+      "Another change operation is in progress. An administrator must verify an abandoned change lock before recovery.",
       409,
     );
     try {

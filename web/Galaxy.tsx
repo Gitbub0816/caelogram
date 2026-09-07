@@ -18,6 +18,8 @@ export interface Edge {
   revision: string;
 }
 export interface MapData {
+  nextCursor?: string | null;
+  visibleFiles?: number;
   id: string;
   name: string;
   branch: string;
