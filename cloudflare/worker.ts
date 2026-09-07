@@ -57,8 +57,13 @@ export interface Env {
   INSTALLATIONS: string;
 }
 const jwksCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
-function service(env: Env) {
-  return new BatchedService(env);
+// Workers cancel un-awaited work the moment a response is returned, so buffered
+// analytics would be dropped without a waitUntil hook. Capture stays off the
+// response path; the isolate is just kept alive until the write lands.
+function service(env: Env, ctx?: ExecutionContext) {
+  const s = new BatchedService(env);
+  if (ctx && s.analytics) s.analytics.defer = (work) => ctx.waitUntil(work);
+  return s;
 }
 function clerkOriginForCsp(env: Env) {
   try {
@@ -165,7 +170,11 @@ async function json(req: Request) {
 function reply(data: unknown, status = 200) {
   return Response.json(data, { status });
 }
-async function route(req: Request, env: Env): Promise<Response> {
+async function route(
+  req: Request,
+  env: Env,
+  ctx?: ExecutionContext,
+): Promise<Response> {
   const url = new URL(req.url),
     path = url.pathname;
   if (
@@ -213,7 +222,7 @@ async function route(req: Request, env: Env): Promise<Response> {
     });
   if (path === "/auth/github/callback" && req.method === "GET") {
     try {
-      return await finishGitHub(req, env, service(env).store);
+      return await finishGitHub(req, env, service(env, ctx).store);
     } catch {
       return new Response(
         '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>GitHub connection · Caelogram</title><body style="background:#191a1a;color:#ece9e2;font:18px system-ui;padding:10%;max-width:640px"><h1>GitHub connection did not finish</h1><p>The authorization may have expired, been declined, or already been used. No repository was modified. Return to Caelogram and try connecting again.</p><a style="color:#d8bc86" href="/?connect=github">Return to your workspace</a></body></html>',
@@ -292,7 +301,7 @@ async function route(req: Request, env: Env): Promise<Response> {
   }
   if (path.startsWith("/api/") || path === "/mcp") {
     const p = await principal(req, env),
-      s = service(env);
+      s = service(env, ctx);
     if (env.CLERK_ISSUER || env.CLERK_PUBLISHABLE_KEY) {
       if (
         path.startsWith("/api/github/") ||
@@ -738,11 +747,11 @@ export default {
       }
     }
   },
-  async fetch(req: Request, env: Env) {
+  async fetch(req: Request, env: Env, ctx: ExecutionContext) {
     const requestId = crypto.randomUUID();
     let response: Response;
     try {
-      response = await route(req, env);
+      response = await route(req, env, ctx);
     } catch (e) {
       console.error(
         JSON.stringify({
