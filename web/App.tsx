@@ -2,6 +2,7 @@ import React, { useEffect, useState, lazy, Suspense } from "react";
 import { Icon } from "./Icon";
 import type { Identity } from "./Auth";
 import Connect from "./Connect";
+import Analytics from "./Analytics";
 import AgentAccess from "./AgentAccess";
 import { Galaxy, colors, type MapData } from "./Galaxy";
 const RepoGalaxy = lazy(() => import("./RepoGalaxy"));
@@ -54,6 +55,23 @@ type Change = {
   };
   pr?: { url: string; number: number };
 };
+/** Three ascending measures. Same stroke language as Icon.tsx. */
+function AnalyticsMark() {
+  return (
+    <svg
+      width="20"
+      height="20"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      aria-hidden="true"
+    >
+      <path d="M4 20h16M7 20v-5M12 20V9M17 20v-8" />
+    </svg>
+  );
+}
 export default function App({
   identity,
   publicMode = false,
@@ -274,6 +292,7 @@ export default function App({
     ["map", "◉", "Repository map"],
     ["context", "⌘", "Task context"],
     ["history", "⎇", "Changesets"],
+    ["analytics", "▤", "Analytics"],
     ["audit", "≡", "Audit trail"],
   ];
   return (
@@ -387,7 +406,7 @@ export default function App({
               onClick={() => navigate(id)}
             >
               <span>
-                <Icon name={id} />
+                {id === "analytics" ? <AnalyticsMark /> : <Icon name={id} />}
               </span>
               {label}
               {id === "context" && task && <i>1</i>}
@@ -791,6 +810,14 @@ export default function App({
               </article>
             </div>
           </section>
+        ) : view === "analytics" ? (
+          <Analytics
+            tool={tool}
+            repoId={demo ? undefined : data?.id}
+            repository={current?.name}
+            session={session}
+            onConnect={() => setView("connect")}
+          />
         ) : view === "audit" ? (
           <section className="page">
             <h1>Audit trail</h1>

@@ -13,7 +13,9 @@ import {
 } from "./service.js";
 import { impact, tokens, BRIEF_BUDGET } from "./graph.js";
 import { Fault } from "./security.js";
+import { ZodError } from "zod";
 import type { Accounting, Principal, Task } from "./types.js";
+import { attributePaths } from "./analytics.js";
 export const IMPACT_LIMIT = 200,
   FIND_LIMIT = 30,
   SEARCH_LIMIT = 20,
@@ -72,7 +74,18 @@ export const schemas = {
   }),
   changeset_status: z.object({ changesetId: z.string() }),
   sync_repository: z.object({ repoId: z.string() }),
+  analytics_report: z.object({
+    repoId: z.string().default(""),
+    days: z.number().int().min(1).max(365).default(30),
+    refresh: z.boolean().default(false),
+  }),
 };
+/**
+ * Console-only tools. They are dispatched over /api/tools like everything else
+ * but are not registered on the MCP surface: aggregate workspace analytics is
+ * for the owner, not something an agent should spend its budget reading.
+ */
+export const consoleOnly = new Set<ToolName>(["analytics_report"]);
 export type ToolName = keyof typeof schemas;
 /** The hard cap of each response, restated to the model in `accounting.bound`. */
 const bounds: Record<ToolName, string> = {
@@ -94,6 +107,8 @@ const bounds: Record<ToolName, string> = {
   publish_pull_request: "One changeset record with the draft pull request",
   changeset_status: "One changeset record",
   sync_repository: "One repository summary; no source, no graph",
+  analytics_report:
+    "One workspace analytics report over a bounded window; at most 25 tasks of token economics, sampled latency, and no source",
 };
 const descriptions: Record<ToolName, string> = {
   index_status:
@@ -121,6 +136,8 @@ const descriptions: Record<ToolName, string> = {
   changeset_status: "Return changeset status and validation evidence.",
   sync_repository:
     "Refresh an existing repository index from GitHub, reusing unchanged declarations. Returns one summary record.",
+  analytics_report:
+    "Workspace analytics: token economics against a measured naive baseline, agent behaviour, change outcomes, index health and per-surface performance. Console surface only.",
 };
 const ESTIMATE =
   "Estimated tokens are UTF-8 bytes divided by three, measured by Caelogram. They are an estimate of ingestion size, not model token billing.";
@@ -160,6 +177,46 @@ export async function dispatch(
   p: Principal,
   name: ToolName,
   input: unknown,
+  surface = "tool",
+) {
+  const started = Date.now();
+  try {
+    const body = await run(service, p, name, input, surface, started);
+    return body;
+  } catch (e) {
+    const status =
+      e instanceof Fault ? e.status : e instanceof ZodError ? 400 : 500;
+    // Capture is best effort and outside the result path: a refusal is itself a
+    // measurement, and a failure here can never change what the caller sees.
+    service.note({
+      tenant: p.tenant,
+      surface,
+      operation: name,
+      repoId:
+        typeof (input as any)?.repoId === "string"
+          ? (input as any).repoId
+          : null,
+      taskId:
+        typeof (input as any)?.taskId === "string"
+          ? (input as any).taskId
+          : null,
+      actor: p.subject,
+      client: (p as any).client ?? null,
+      outcome: status >= 500 ? "error" : "refused",
+      status,
+      reason: e instanceof Error ? e.message : "Tool failed",
+      latencyMs: Date.now() - started,
+    });
+    throw e;
+  }
+}
+async function run(
+  service: Service<Storage>,
+  p: Principal,
+  name: ToolName,
+  input: unknown,
+  surface: string,
+  started: number,
 ) {
   const a: any = schemas[name].parse(input);
   let task: Task | undefined;
@@ -203,7 +260,74 @@ export async function dispatch(
   }
   if (name === "begin_change" && value?.id)
     body.accounting.task = service.ledger(value as Task);
+  const taskId =
+    typeof a.taskId === "string"
+      ? a.taskId
+      : name === "begin_change" && value?.id
+        ? String(value.id)
+        : (task?.id ?? null);
+  service.note({
+    tenant: p.tenant,
+    surface,
+    operation: name,
+    repoId:
+      typeof a.repoId === "string"
+        ? a.repoId
+        : (task?.repoId ??
+          (typeof value?.repoId === "string" ? value.repoId : null)),
+    taskId,
+    actor: p.subject,
+    client: (p as any).client ?? null,
+    outcome: "ok",
+    status: 200,
+    estimatedTokens: body.accounting.estimatedTokens,
+    omittedCount: body.accounting.omitted.reduce(
+      (n: number, o: any) => n + (o.count ?? 1),
+      0,
+    ),
+    bound: bounds[name],
+    latencyMs: Date.now() - started,
+    detail: detailOf(name, value),
+    paths: attributePaths(name, a, value),
+  });
+  // Validation passing or failing is the outcome signal, and the tool succeeds
+  // either way, so it is recorded as its own event.
+  if (name === "validate_changeset")
+    service.note({
+      tenant: p.tenant,
+      surface: "outcome",
+      operation: "validation",
+      repoId: task?.repoId ?? null,
+      taskId: value?.taskId ?? null,
+      actor: p.subject,
+      outcome: value?.validation?.passed ? "ok" : "refused",
+      status: value?.validation?.passed ? 200 : 422,
+      reason: value?.validation?.errors?.[0] ?? null,
+      detail: {
+        changesetId: value?.id,
+        errors: value?.validation?.errors?.length ?? 0,
+        warnings: value?.validation?.warnings?.length ?? 0,
+      },
+    });
   return body;
+}
+/** Small, countable facts about a result. Never source, never a snippet. */
+function detailOf(name: ToolName, value: any): Record<string, unknown> | null {
+  if (!value || typeof value !== "object") return null;
+  if (name === "submit_changeset")
+    return { changesetId: value.id, edits: value.edits?.length ?? 0 };
+  if (name === "begin_change")
+    return {
+      budget: value.context?.budget,
+      contextTokens: value.context?.estimatedTokens,
+      sourceTokens: value.context?.sourceTokens,
+      delivered: value.context?.items?.length ?? 0,
+      omitted: value.context?.omittedCount ?? 0,
+      planned: value.context?.planCount ?? value.context?.plan?.length ?? 0,
+    };
+  if (name === "publish_pull_request")
+    return { changesetId: value.id, pullRequest: value.pr?.number ?? null };
+  return null;
 }
 async function execute(
   service: Service<Storage>,
@@ -347,12 +471,19 @@ async function execute(
       const r = await service.repo(p, a.repoId);
       return await service.connect(p, r.name, r.branch, r.installationId);
     }
+    case "analytics_report":
+      return await service.report(p, {
+        repoId: a.repoId || undefined,
+        days: a.days,
+        refresh: a.refresh,
+      });
   }
   throw new Fault(404, "Unknown tool");
 }
 export function mcp(service: Service<Storage>, p: Principal) {
   const server = new McpServer({ name: "caelogram", version: "0.1.0" });
-  for (const [name, schema] of Object.entries(schemas))
+  for (const [name, schema] of Object.entries(schemas)) {
+    if (consoleOnly.has(name as ToolName)) continue;
     server.registerTool(
       name,
       {
@@ -382,7 +513,7 @@ export function mcp(service: Service<Storage>, p: Principal) {
               {
                 type: "text" as const,
                 text: JSON.stringify(
-                  await dispatch(service, p, name as ToolName, input),
+                  await dispatch(service, p, name as ToolName, input, "mcp"),
                 ),
               },
             ],
@@ -400,6 +531,7 @@ export function mcp(service: Service<Storage>, p: Principal) {
         }
       },
     );
+  }
   // Resources let a client attach the brief or a task package without spending
   // a tool round trip. Both are the same bounded records the tools return.
   server.registerResource(
