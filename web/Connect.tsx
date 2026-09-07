@@ -10,7 +10,7 @@ export default function Connect({
 }) {
   const [repos, setRepos] = useState<Repo[]>([]),
     [connected, setConnected] = useState<
-      { id: string; name: string; branch: string }[]
+      { id: string; name: string; branch: string; status: string }[]
     >([]),
     [installUrl, setInstallUrl] = useState(""),
     [choice, setChoice] = useState(""),
@@ -284,7 +284,11 @@ export default function Connect({
           )}
           {!!connected.length && (
             <div className="repo-list">
-              <h2>Your indexed repositories</h2>
+              <h2>Repositories you can open</h2>
+              <p className="muted">
+                Everyone GitHub grants a repository to shares its index, so a
+                repository a colleague mapped appears here too.
+              </p>
               {connected.map((r) => (
                 <button
                   key={r.id}
@@ -303,7 +307,10 @@ export default function Connect({
                   }
                 >
                   {r.name}
-                  <span>{r.branch}</span>
+                  <span>
+                    {r.branch}
+                    {r.status && r.status !== "ready" ? ` · ${r.status}` : ""}
+                  </span>
                 </button>
               ))}
             </div>

@@ -77,6 +77,7 @@ export default function App({
     [token, setToken] = useState(""),
     [localSession, setSession] = useState(""),
     [repositories, setRepositories] = useState<any[]>([]),
+    [switcherOpen, setSwitcherOpen] = useState(false),
     [demo, setDemo] = useState(true),
     [mapMode, setMapMode] = useState<"orbit" | "heatmap" | "table">("orbit"),
     [galaxyData, setGalaxyData] = useState<GalaxyPayload | null>(null),
@@ -157,6 +158,20 @@ export default function App({
     };
   }, [data?.id, data?.revision, demo]);
   useEffect(() => setFilters(defaultFilters), [data?.id]);
+  // Every repository this identity may open, as GitHub currently sees it.
+  // Never a client-side list: the service resolves access on each call.
+  const loadRepositories = async () => {
+    if (!identity?.signedIn && !localSession) return;
+    try {
+      setRepositories(await tool("list_repositories", {}));
+    } catch {
+      // A missing GitHub link is not an error worth interrupting the page for;
+      // the Connect page explains it.
+    }
+  };
+  useEffect(() => {
+    void loadRepositories();
+  }, [identity?.signedIn]);
   const loadRepo = async (id: string) => {
     const next = await tool("repository_map", { repoId: id });
     setData(next);
@@ -165,6 +180,8 @@ export default function App({
     setTask(null);
     setChange(null);
     setView("map");
+    setSwitcherOpen(false);
+    void loadRepositories();
   };
   const showDemo = () =>
     act("Loading sample", async () => {
@@ -224,6 +241,33 @@ export default function App({
   const body = selected ? galaxy?.byPath.get(selected) : undefined;
   // File nodes are keyed by path, so the selection is the path.
   const selectedItem = task?.context.items.find((i) => i.path === selected);
+  // Repositories grouped by the GitHub account that owns them: that account is
+  // the workspace, and everyone GitHub grants the repository to shares it.
+  const workspaces = [
+    ...repositories
+      .reduce((acc: Map<string, any[]>, r: any) => {
+        const owner = String(r.name).split("/")[0];
+        acc.set(owner, [...(acc.get(owner) ?? []), r]);
+        return acc;
+      }, new Map())
+      .entries(),
+  ].sort(([a], [b]) => a.localeCompare(b));
+  const indexState = (status: string) =>
+    status === "ready"
+      ? { className: "ready", label: "Ready" }
+      : status === "failed"
+        ? { className: "failed", label: "Failed" }
+        : status === "deleting"
+          ? { className: "failed", label: "Deleting" }
+          : { className: "indexing", label: "Indexing" };
+  const current = repositories.find((r: any) => !demo && r.id === data?.id);
+  const currentOwner = current ? String(current.name).split("/")[0] : "";
+  const openRepository = (r: any) => {
+    setSwitcherOpen(false);
+    if (r.status === "ready") void act("Opening map", () => loadRepo(r.id));
+    // An index that is still being built has a live progress view of its own.
+    else setView("connect");
+  };
   const nav = [
     ["map", "◉", "Repository map"],
     ["context", "⌘", "Task context"],
@@ -240,14 +284,97 @@ export default function App({
         >
           <img className="brand-logo" src="/logo.png" alt="caelogram" />
         </button>
-        <div className="workspace">
-          <span className="workspace-icon">C</span>
-          <div>
-            Personal workspace
-            <small>
-              {session ? "Connected session" : "Interactive preview"}
-            </small>
-          </div>
+        <div
+          className="workspace"
+          onKeyDown={(e) => e.key === "Escape" && setSwitcherOpen(false)}
+        >
+          <button
+            className="workspace-switch"
+            aria-label="Switch repository"
+            aria-expanded={switcherOpen}
+            aria-haspopup="listbox"
+            disabled={!session}
+            onClick={() => {
+              setSwitcherOpen(!switcherOpen);
+              if (!switcherOpen) void loadRepositories();
+            }}
+          >
+            <span className="workspace-icon">
+              {(currentOwner || "C").slice(0, 1).toUpperCase()}
+            </span>
+            <span className="workspace-label">
+              {currentOwner || (session ? "Your workspaces" : "Sample")}
+              <small>
+                {current
+                  ? String(current.name).split("/").slice(1).join("/")
+                  : session
+                    ? `${repositories.length} repositor${repositories.length === 1 ? "y" : "ies"}`
+                    : "Interactive preview"}
+              </small>
+            </span>
+            {session && <span className="workspace-caret">▾</span>}
+          </button>
+          {switcherOpen && (
+            <div className="workspace-menu" role="listbox">
+              {workspaces.map(([owner, repos]) => (
+                <div
+                  className="workspace-group"
+                  role="group"
+                  aria-label={owner}
+                  key={owner}
+                >
+                  <span className="workspace-owner">{owner}</span>
+                  {repos.map((r: any) => {
+                    const state = indexState(r.status);
+                    return (
+                      <button
+                        key={r.id}
+                        role="option"
+                        aria-selected={current?.id === r.id}
+                        className={
+                          "workspace-repo" +
+                          (current?.id === r.id ? " active" : "")
+                        }
+                        onClick={() => openRepository(r)}
+                      >
+                        <span>
+                          {String(r.name).split("/").slice(1).join("/")}
+                        </span>
+                        <i className={"repo-state " + state.className}>
+                          {state.label}
+                        </i>
+                      </button>
+                    );
+                  })}
+                </div>
+              ))}
+              {!repositories.length && (
+                <p className="workspace-empty">
+                  No indexed repositories yet. GitHub decides what appears here.
+                </p>
+              )}
+              <button
+                className="workspace-action"
+                onClick={() => {
+                  setSwitcherOpen(false);
+                  setView("connect");
+                }}
+              >
+                <Icon name="plus" /> Connect a repository
+              </button>
+              {!demo && (
+                <button
+                  className="workspace-action"
+                  onClick={() => {
+                    setSwitcherOpen(false);
+                    void showDemo();
+                  }}
+                >
+                  Open the sample repository
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         <nav>

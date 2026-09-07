@@ -145,7 +145,10 @@ export interface Changeset {
   createdAt: string;
 }
 export interface Principal {
+  /** Active workspace. Repository lookups move it to the workspace that holds the repository. */
   tenant: string;
+  /** Every workspace this principal may read, derived from GitHub, never from a client. */
+  tenants?: string[];
   subject: string;
   scopes: string[];
   repositories: string[];

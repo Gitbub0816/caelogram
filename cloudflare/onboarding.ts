@@ -33,11 +33,49 @@ function tokenRecord(token: any): GitHubLink {
       : {}),
   };
 }
+export type RepoOwner = {
+  login: string;
+  id: number;
+  type: "org" | "user";
+};
 export type AvailableRepo = {
   name: string;
   branch: string;
   installationId: number;
+  owner: RepoOwner;
+  /** Workspace this repository belongs to. See ownerTenant. */
+  tenant: string;
 };
+
+/**
+ * Workspace key: `gh:org:<account id>` or `gh:user:<account id>`.
+ *
+ * A repository belongs to the GitHub account that owns it, never to the person
+ * who happened to index it first, so every collaborator GitHub grants access to
+ * sees one shared index instead of a private copy per signed-in user.
+ *
+ * The key holds GitHub's immutable numeric account id rather than the login, so
+ * renaming an organization does not split its workspace, and it keeps the
+ * account type as a separate segment so an organization and a user account can
+ * never resolve to the same key even if GitHub's login namespaces ever diverge.
+ * Logins are display data only; they are never part of the key.
+ */
+export function ownerTenant(owner: RepoOwner) {
+  return `gh:${owner.type}:${owner.id}`;
+}
+
+/**
+ * Per-person key. Holds only individual credentials and grants — the GitHub
+ * OAuth link, OAuth states, agent tokens, cached access — never repository
+ * indexes, which live under the workspace their GitHub owner defines. Legacy
+ * indexes created before workspaces exist under this key until adopted.
+ */
+export function identityTenant(subject: string) {
+  return `user:${subject}`;
+}
+
+/** GitHub is asked again at most this often; a revoked grant dies within it. */
+export const ACCESS_TTL_MS = 180_000;
 const keys = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 
 /** Clerk's Frontend API URL is also the JWT issuer. */
@@ -88,9 +126,12 @@ export async function clerkIdentity(
       401,
     );
     // Never accept tenant IDs, wildcard grants or roles supplied by a browser.
+    // The identity key is all a signed-in session proves; the workspaces it can
+    // read come from GitHub through resolveAccess, never from this token.
     return {
       subject: payload.sub,
-      tenant: `user:${payload.sub}`,
+      tenant: identityTenant(payload.sub),
+      tenants: [identityTenant(payload.sub)],
       scopes: ["admin"],
       repositories: [],
     };
@@ -195,17 +236,183 @@ export async function availableRepositories(
         "Installation exceeds the 1,000 repository listing limit",
         413,
       );
-      for (const repo of data.repositories)
-        if (repo.permissions?.push && !repo.archived && !repo.disabled)
-          result.push({
-            name: repo.full_name,
-            branch: repo.default_branch,
-            installationId: installation.id,
-          });
+      for (const repo of data.repositories) {
+        if (!repo.permissions?.push || repo.archived || repo.disabled) continue;
+        const owner = repoOwner(repo);
+        // Without an owner account id and type GitHub has not told us which
+        // workspace the repository belongs to. Omit it rather than guess.
+        if (!owner) continue;
+        result.push({
+          name: repo.full_name,
+          branch: repo.default_branch,
+          installationId: installation.id,
+          owner,
+          tenant: ownerTenant(owner),
+        });
+      }
       if (page * 100 >= data.total_count) break;
     }
   }
   return result;
+}
+function repoOwner(repo: any): RepoOwner | null {
+  const type =
+    repo?.owner?.type === "Organization"
+      ? "org"
+      : repo?.owner?.type === "User"
+        ? "user"
+        : null;
+  if (!type) return null;
+  const id = Number(repo.owner.id),
+    login = repo.owner.login;
+  if (!Number.isSafeInteger(id) || id <= 0 || typeof login !== "string")
+    return null;
+  return { login, id, type };
+}
+export type LegacyIndex = { tenant: string; name: string };
+export type Access = {
+  /** Every workspace GitHub currently grants this principal, plus its own. */
+  tenants: string[];
+  repositories: AvailableRepo[];
+  /** Pre-workspace per-user tenants still holding an index this principal may read. */
+  legacy: LegacyIndex[];
+  /** Workspace → installations that workspace may index through. */
+  installations: Record<string, number[]>;
+  /** Repository full name → workspace that owns it. */
+  workspaces: Record<string, string>;
+  cached: boolean;
+};
+/**
+ * The only answer to "what may this person see", and it comes from GitHub.
+ *
+ * The resolved list is cached in D1 for ACCESS_TTL_MS keyed by the individual,
+ * so a page of requests costs one GitHub round trip, and a grant revoked on
+ * GitHub stops working once the entry expires — the cache is never extended
+ * when GitHub is unreachable, so an outage fails closed rather than open.
+ */
+export async function resolveAccess(
+  store: CloudStore,
+  env: Env,
+  p: Principal,
+  options: { force?: boolean } = {},
+): Promise<Access> {
+  const key = identityTenant(p.subject);
+  const row = options.force
+    ? null
+    : await env.DB.prepare(
+        "SELECT repositories,legacy FROM access_cache WHERE principal=? AND expires>?",
+      )
+        .bind(key, Date.now())
+        .first<{ repositories: string; legacy: string }>();
+  let repositories: AvailableRepo[], legacy: LegacyIndex[];
+  let cached = true;
+  if (row) {
+    repositories = JSON.parse(row.repositories);
+    legacy = JSON.parse(row.legacy);
+  } else {
+    cached = false;
+    repositories = await availableRepositories(store, key, env);
+    // Completing the 0006 backfill needs the owner identity only GitHub knows.
+    legacy = await linkLegacyIndexes(env, repositories);
+    await env.DB.prepare(
+      "INSERT INTO access_cache(principal,repositories,legacy,refreshed,expires) VALUES(?,?,?,?,?) ON CONFLICT(principal) DO UPDATE SET repositories=excluded.repositories,legacy=excluded.legacy,refreshed=excluded.refreshed,expires=excluded.expires",
+    )
+      .bind(
+        key,
+        JSON.stringify(repositories),
+        JSON.stringify(legacy),
+        Date.now(),
+        Date.now() + ACCESS_TTL_MS,
+      )
+      .run();
+  }
+  const installations: Record<string, number[]> = {},
+    workspaces: Record<string, string> = {};
+  for (const r of repositories) {
+    workspaces[r.name] = r.tenant;
+    const ids = (installations[r.tenant] ??= []);
+    if (!ids.includes(r.installationId)) ids.push(r.installationId);
+  }
+  // A legacy tenant is readable, and re-indexable only through the installation
+  // that carries the repository it actually holds; every call is still gated per
+  // repository name by Principal.repositories.
+  for (const item of legacy) {
+    const source = repositories.find((r) => r.name === item.name);
+    if (!source) continue;
+    const ids = (installations[item.tenant] ??= []);
+    if (!ids.includes(source.installationId)) ids.push(source.installationId);
+  }
+  return {
+    tenants: [
+      ...new Set([
+        key,
+        ...repositories.map((r) => r.tenant),
+        ...legacy.map((l) => l.tenant),
+      ]),
+    ],
+    repositories,
+    legacy,
+    installations,
+    workspaces,
+    cached,
+  };
+}
+/** Workspaces an agent token may reach, derived from its verified repositories. */
+export async function agentWorkspaces(env: Env, p: Principal) {
+  const names = p.repositories.filter((n) => n !== "*");
+  if (!names.length) return [p.tenant];
+  const rows = await env.DB.prepare(
+    `SELECT DISTINCT tenant FROM index_repos WHERE name IN (${names.map(() => "?").join(",")})`,
+  )
+    .bind(...names)
+    .all<{ tenant: string }>();
+  return [...new Set([p.tenant, ...rows.results.map((r) => r.tenant)])];
+}
+/**
+ * Second half of migration 0006, run the first time a person GitHub still
+ * grants push access to a pre-workspace repository signs in.
+ *
+ * The migration parked every `user:<clerk sub>` index in `tenant_backfill`
+ * because only GitHub can say which account owns a repository. Here that owner
+ * is finally known, so the legacy tenant is recorded against its workspace and
+ * admitted to the scope of everyone the workspace covers: the existing index
+ * survives untouched and becomes shared, exactly as if it had been created
+ * under the workspace key.
+ *
+ * Its rows are deliberately not rewritten to the workspace key. Every indexed
+ * file's source is an R2 object whose AES-GCM additional data binds it to the
+ * tenant it was written under, so a SQL tenant rewrite would leave the index
+ * pointing at payloads that no longer decrypt. Re-encrypting a whole repository
+ * inside a request is not something this path can honestly do, so the mapping
+ * is recorded instead and the data is left where it is and reachable.
+ *
+ * Returns the legacy indexes this principal may read through its GitHub grants.
+ */
+export async function linkLegacyIndexes(
+  env: Env,
+  repositories: AvailableRepo[],
+): Promise<LegacyIndex[]> {
+  if (!repositories.length) return [];
+  const names = [...new Set(repositories.map((r) => r.name))];
+  const byName = new Map(repositories.map((r) => [r.name, r.tenant]));
+  const rows = await env.DB.prepare(
+    `SELECT old_tenant,repo_id,name FROM tenant_backfill WHERE name IN (${names.map(() => "?").join(",")})`,
+  )
+    .bind(...names)
+    .all<{ old_tenant: string; repo_id: string; name: string }>();
+  const writes = rows.results.map((r) =>
+    env.DB.prepare(
+      "UPDATE tenant_backfill SET new_tenant=?,linked=? WHERE old_tenant=? AND repo_id=? AND (new_tenant IS NULL OR new_tenant=?)",
+    ).bind(
+      byName.get(r.name)!,
+      Date.now(),
+      r.old_tenant,
+      r.repo_id,
+      byName.get(r.name)!,
+    ),
+  );
+  if (writes.length) await env.DB.batch(writes);
+  return rows.results.map((r) => ({ tenant: r.old_tenant, name: r.name }));
 }
 export async function startGitHub(p: Principal, env: Env) {
   const missing = [
@@ -281,6 +488,10 @@ export async function finishGitHub(req: Request, env: Env, store: CloudStore) {
     400,
   );
   await githubJson(token.access_token, "/user");
+  // A fresh authorization must be visible immediately, not after the TTL.
+  await env.DB.prepare("DELETE FROM access_cache WHERE principal=?")
+    .bind(row.tenant)
+    .run();
   await store.exclusive(row.tenant, async () => {
     await store.put(row.tenant, "github-link", tokenRecord(token));
     await store.audit(
