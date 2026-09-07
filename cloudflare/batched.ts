@@ -1,16 +1,27 @@
 import {
   Service,
+  fitPage,
+  MAP_PAGE_BOUNDARY_EDGES,
+  MAP_PAGE_FILES,
+  MAP_PAGE_NODES,
   type ComponentDetail,
   type GalaxyData,
 } from "../src/service.js";
 import { GitHub } from "../src/github.js";
 import { CloudStore } from "./store.js";
 import { assert, digest, Fault, redact } from "../src/security.js";
-import { index, eligible, context } from "../src/graph.js";
+import {
+  index,
+  eligible,
+  context,
+  fitBrief,
+  noteOmission,
+} from "../src/graph.js";
 import type {
   Graph,
   Principal,
   Repository,
+  RepositoryBrief,
   Task,
   SourceFile,
 } from "../src/types.js";
@@ -18,6 +29,7 @@ import type { Env } from "./worker.js";
 import { availableRepositories } from "./onboarding.js";
 const GALAXY_NODE_LIMIT = 20000,
   GALAXY_EDGE_LIMIT = 60000,
+  MAP_PAGE_EDGES = 2000,
   COMPONENT_EDGE_LIMIT = 400;
 import { posix } from "node:path";
 import {
@@ -426,44 +438,195 @@ export class BatchedService extends Service<CloudStore> {
       after,
       query,
     ).all<File>();
-    const page = rows.results.slice(0, 50),
+    const page = rows.results.slice(0, MAP_PAGE_FILES),
       g = empty(j.revision);
+    let symbolOverflow = 0;
     for (const f of page) {
       const meta = JSON.parse(f.metadata);
-      g.nodes.push(...meta.nodes);
+      for (const n of meta.nodes)
+        if (g.nodes.length < MAP_PAGE_NODES) g.nodes.push(n);
+        else symbolOverflow++;
       g.warnings.push(...meta.warnings);
     }
     const paths = new Set(page.map((f) => f.path));
-    for (const f of page) {
-      const edges = await this.q(
-        'SELECT src AS "from",dst AS "to",kind,evidence,confidence FROM index_edges WHERE tenant=? AND job=? AND src=? LIMIT 201',
-        p.tenant,
-        j.id,
-        f.path,
-      ).all<any>();
-      g.edges.push(
-        ...edges.results
-          .filter((e) => paths.has(e.to))
-          .map((e) => ({
-            ...e,
-            confidence: e.confidence ?? 1,
-            revision: j.revision,
-          })),
-      );
+    // One query for the whole page. D1 caps bound variables, so the page's
+    // contiguous path range prefilters and the exact page set decides below.
+    const lo = page[0]?.path ?? "",
+      hi = page.at(-1)?.path ?? "";
+    const links = page.length
+      ? await this.q(
+          'SELECT src AS "from",dst AS "to",kind,evidence,confidence FROM index_edges WHERE tenant=? AND job=? AND ((src>=? AND src<=?) OR (dst>=? AND dst<=?)) LIMIT ?',
+          p.tenant,
+          j.id,
+          lo,
+          hi,
+          lo,
+          hi,
+          MAP_PAGE_EDGES + 1,
+        ).all<any>()
+      : { results: [] as any[] };
+    const edgeOverflow = Math.max(0, links.results.length - MAP_PAGE_EDGES);
+    const crossing: any[] = [];
+    for (const e of links.results.slice(0, MAP_PAGE_EDGES)) {
+      if (!paths.has(e.from) && !paths.has(e.to)) continue;
+      const relation = {
+        ...e,
+        confidence: e.confidence ?? 1,
+        revision: j.revision,
+      };
+      if (paths.has(e.from) && paths.has(e.to)) g.edges.push(relation);
+      else
+        crossing.push({
+          ...relation,
+          offPage: paths.has(e.from) ? e.to : e.from,
+        });
     }
     const r = await this.record(p, id);
-    return {
+    return fitPage({
       ...(await this.summaryRecord(r)),
       nodes: g.nodes,
       edges: g.edges,
+      boundaryEdges: crossing.slice(0, MAP_PAGE_BOUNDARY_EDGES),
+      boundaryEdgeCount: crossing.length,
       warnings: [
         ...g.warnings.slice(0, 30),
-        `Showing ${page.length} of ${j.files} indexed files. Search or request another page; cross-page relationships are omitted from this view.`,
+        `Showing ${page.length} of ${j.files} indexed files. ${crossing.length} relationships cross this page boundary and are listed in boundaryEdges (first ${Math.min(crossing.length, MAP_PAGE_BOUNDARY_EDGES)}).`,
         `${j.excluded} metadata-only entries retained; select a file to inspect its reason.`,
       ],
-      nextCursor: rows.results.length > 50 ? page.at(-1)!.path : null,
+      nextCursor:
+        rows.results.length > MAP_PAGE_FILES ? page.at(-1)!.path : null,
       visibleFiles: page.length,
+      omissions: [
+        ...(rows.results.length > MAP_PAGE_FILES
+          ? [
+              {
+                what: "files",
+                why: `Map pages carry at most ${MAP_PAGE_FILES} files; continue with nextCursor or a path query`,
+                count: j.files - page.length,
+              },
+            ]
+          : []),
+        ...(symbolOverflow
+          ? [
+              {
+                what: "symbols on this page",
+                why: `Page node cap of ${MAP_PAGE_NODES}; use find_component for a specific declaration`,
+                count: symbolOverflow,
+              },
+            ]
+          : []),
+        ...(crossing.length > MAP_PAGE_BOUNDARY_EDGES
+          ? [
+              {
+                what: "boundary relationships",
+                why: `At most ${MAP_PAGE_BOUNDARY_EDGES} cross-page relationships are listed`,
+                count: crossing.length - MAP_PAGE_BOUNDARY_EDGES,
+              },
+            ]
+          : []),
+        ...(edgeOverflow
+          ? [
+              {
+                what: "relationships touching this page",
+                why: `At most ${MAP_PAGE_EDGES} relationships are read per page`,
+                count: edgeOverflow,
+              },
+            ]
+          : []),
+      ],
+    });
+  }
+  /**
+   * Repository brief from aggregate queries: no metadata blob and no source is
+   * read, so the cost does not grow with repository size. Per-directory symbol
+   * counts are not stored in the hosted index, so they are reported as missing
+   * rather than guessed.
+   */
+  async brief(p: Principal, id: string) {
+    const record = await this.q(
+      "SELECT id FROM index_repos WHERE tenant=? AND id=?",
+      p.tenant,
+      id,
+    ).first();
+    if (!record) return super.brief(p, id);
+    const j = await this.current(p, id),
+      r = await this.record(p, id);
+    const summary = await this.summaryRecord(r);
+    const files = await this.q(
+      "SELECT path FROM index_files WHERE tenant=? AND job=? ORDER BY path LIMIT 20001",
+      p.tenant,
+      j.id,
+    ).all<{ path: string }>();
+    const hubs = await this.q(
+      "SELECT dst AS path,count(*) AS dependents FROM index_edges WHERE tenant=? AND job=? GROUP BY dst ORDER BY dependents DESC,dst LIMIT 8",
+      p.tenant,
+      j.id,
+    ).all<{ path: string; dependents: number }>();
+    const entrypoints = await this.q(
+      "SELECT src AS path,count(*) AS outgoing FROM index_edges WHERE tenant=? AND job=? AND src NOT IN (SELECT dst FROM index_edges WHERE tenant=? AND job=?) GROUP BY src ORDER BY outgoing DESC,src LIMIT 6",
+      p.tenant,
+      j.id,
+      p.tenant,
+      j.id,
+    ).all<{ path: string; outgoing: number }>();
+    const groups = new Map<string, number>(),
+      languages = new Map<string, number>();
+    for (const f of files.results) {
+      const dir = posix.dirname(f.path);
+      groups.set(dir, (groups.get(dir) ?? 0) + 1);
+      const ext = f.path.includes(".")
+        ? f.path.slice(f.path.lastIndexOf("."))
+        : "(none)";
+      languages.set(ext, (languages.get(ext) ?? 0) + 1);
+    }
+    const brief: RepositoryBrief = {
+      id: r.id,
+      name: r.name,
+      branch: r.branch,
+      status: j.phase,
+      revision: j.revision,
+      indexedAt: j.created,
+      files: summary.files,
+      symbols: summary.symbols,
+      relationships: summary.relationships,
+      subsystems: [...groups]
+        .map(([path, count]) => ({ path, files: count }))
+        .sort((a, b) => b.files - a.files || a.path.localeCompare(b.path))
+        .slice(0, 10),
+      hubs: hubs.results,
+      entrypoints: entrypoints.results.map((e) => ({
+        path: e.path,
+        evidence: `No incoming static import at this revision; ${e.outgoing} outgoing`,
+      })),
+      languages: [...languages]
+        .map(([extension, count]) => ({ extension, files: count }))
+        .sort(
+          (a, b) => b.files - a.files || a.extension.localeCompare(b.extension),
+        )
+        .slice(0, 6),
+      warnings: [
+        "Static imports and AST declarations only. Calls, framework routes, runtime discovery, aliases, and coverage are not proven.",
+      ],
+      truncated: [],
+      next: "Structure is only available through map_page (50 files), find_component (30 matches) and begin_change. No tool returns the whole graph.",
     };
+    const note = noteOmission(brief);
+    note(
+      "subsystems",
+      groups.size - brief.subsystems.length,
+      "Only the largest directories are listed; page the map for the rest",
+    );
+    note(
+      "per-subsystem symbol counts",
+      1,
+      "Declaration counts are not aggregated per directory in the hosted index",
+    );
+    note(
+      "paths considered for subsystems",
+      Math.max(0, summary.files - files.results.length),
+      "At most 20,000 indexed paths are aggregated for the brief",
+    );
+    return fitBrief(brief);
   }
   async map(p: Principal, id: string) {
     const r = await this.q(
@@ -708,13 +871,16 @@ export class BatchedService extends Service<CloudStore> {
       j,
       rows.results.map((f) => f.path),
     );
+    const selected = context(g, prompt, budget);
     const t: Task = {
       id: crypto.randomUUID(),
       repoId,
       prompt,
       base: j.revision,
-      context: context(g, prompt, budget),
+      context: selected,
       createdAt: new Date().toISOString(),
+      pullBudget: Math.min(48000, budget * 4),
+      spent: selected.estimatedTokens,
     };
     t.context.warnings.push(
       "Token baseline covers the retrieved neighborhood, not the entire repository.",
