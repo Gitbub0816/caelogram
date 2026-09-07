@@ -347,6 +347,72 @@ async function route(req: Request, env: Env): Promise<Response> {
       p.tenants = access.tenants;
       s.installations = access.installations;
       s.workspaces = access.workspaces;
+      // Deployment readiness. Admin-gated and boolean-only — it reports whether a
+      // secret is set and whether a table exists, never a value — because the
+      // alternative is reading Cloudflare logs to find out that a migration was
+      // never applied.
+      if (path === "/api/diagnostics" && req.method === "GET") {
+        s.allowed(p, "admin");
+        const required = [
+          "objects",
+          "audit",
+          "locks",
+          "jobs",
+          "oauth_states",
+          "agent_tokens",
+          "index_repos",
+          "index_jobs",
+          "index_files",
+          "index_edges",
+          "access_cache",
+          "tenant_backfill",
+        ];
+        const present = new Set(
+          (
+            await env.DB.prepare(
+              "SELECT name FROM sqlite_master WHERE type='table'",
+            ).all<{ name: string }>()
+          ).results.map((r) => r.name),
+        );
+        let migrations: string[] = [];
+        try {
+          migrations = (
+            await env.DB.prepare(
+              "SELECT name FROM d1_migrations ORDER BY id",
+            ).all<{ name: string }>()
+          ).results.map((r) => r.name);
+        } catch {
+          // The tracking table itself is absent when nothing has been applied.
+        }
+        const missing = required.filter((t) => !present.has(t));
+        return reply({
+          schema: {
+            ready: missing.length === 0,
+            missingTables: missing,
+            appliedMigrations: migrations,
+            remedy: missing.length
+              ? "wrangler d1 migrations apply caelogram --remote"
+              : null,
+          },
+          configuration: Object.fromEntries(
+            [
+              "PUBLIC_ORIGIN",
+              "CLERK_PUBLISHABLE_KEY",
+              "CLERK_ISSUER",
+              "GITHUB_APP_ID",
+              "GITHUB_APP_SLUG",
+              "GITHUB_CLIENT_ID",
+              "GITHUB_CLIENT_SECRET",
+              "GITHUB_PRIVATE_KEY",
+              "GITHUB_WEBHOOK_SECRET",
+            ].map((k) => [k, Boolean((env as any)[k])]),
+          ),
+          bindings: {
+            DB: Boolean(env.DB),
+            INDEX_QUEUE: Boolean(env.INDEX_QUEUE),
+          },
+        });
+      }
       if (path === "/api/audit" && req.method === "GET") {
         // One trail per workspace: merge the workspaces GitHub still grants,
         // plus this person's own. Another person's identity trail is not theirs.
@@ -461,15 +527,22 @@ export async function processCloudJobs(env: Env) {
       await env.INDEX_QUEUE.send({ tenant: job.tenant, job: job.id });
     else await advanceIndex(env, job.tenant, job.id);
   }
-  await env.DB.prepare("DELETE FROM oauth_states WHERE expires<?")
-    .bind(Date.now())
-    .run();
-  await env.DB.prepare("DELETE FROM agent_tokens WHERE expires<?")
-    .bind(Date.now())
-    .run();
-  await env.DB.prepare("DELETE FROM access_cache WHERE expires<?")
-    .bind(Date.now() - 86_400_000)
-    .run();
+  // Housekeeping is best-effort and independent. A single failing statement —
+  // most often a table an unapplied migration never created — used to abort the
+  // whole scheduled run, silently skipping every later step.
+  for (const [statement, cutoff] of [
+    ["DELETE FROM oauth_states WHERE expires<?", Date.now()],
+    ["DELETE FROM agent_tokens WHERE expires<?", Date.now()],
+    ["DELETE FROM access_cache WHERE expires<?", Date.now() - 86_400_000],
+  ] as const)
+    try {
+      await env.DB.prepare(statement).bind(cutoff).run();
+    } catch (e) {
+      console.error(
+        `Scheduled cleanup failed: ${statement} — ${e instanceof Error ? e.message : e}. ` +
+          "If this names a missing table, apply the D1 migrations: wrangler d1 migrations apply caelogram --remote",
+      );
+    }
   const s = service(env);
   // One scheduler at a time, and durable per-tenant mutation locks below.
   await s.store.exclusive("$scheduler", async () => {
