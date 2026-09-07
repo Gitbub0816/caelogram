@@ -1132,6 +1132,10 @@ export default function App({
                       <h2>{node.name}</h2>
                       <p className="path">{node.path}</p>
                       <span className="pill">{node.kind}</span>
+                      {node.analysis && <p>Analysis: {node.analysis}</p>}
+                      {node.exclusionReason && (
+                        <p role="note">{node.exclusionReason}</p>
+                      )}
                       {selectedItem && (
                         <span className="pill gold">
                           {selectedItem.required

@@ -6,11 +6,64 @@ const p = {
   tenant: "memory-test",
   subject: "test",
   scopes: ["admin"],
-  repositories: ["test/repo", "test/oversized"],
+  repositories: [
+    "test/repo",
+    "test/oversized",
+    "test/inventory",
+    "test/fallback",
+  ],
+};
+const inventory: Record<string, string | null> = {
+  "App/Main.cs": "namespace App; public class Main {}",
+  "App/App.csproj":
+    '<Project><ProjectReference Include="../Core/Core.csproj" /></Project>',
+  "Core/Core.csproj": '<Project Sdk="Microsoft.NET.Sdk"/>',
+  "app.custom": 'image="./logo.png"',
+  "logo.png": null,
+  ".env": null,
+  "dense.ts": Array.from(
+    { length: 2100 },
+    (_, i) => `export const value${i}=${i};`,
+  ).join("\n"),
 };
 GitHub.prototype.api = async (_name, _installation, route) => {
+  if (_name === "test/fallback" && route.startsWith("/git/trees/")) {
+    if (route.includes("?recursive=")) return { truncated: true, tree: [] };
+    return {
+      tree: route.endsWith("/tree")
+        ? [{ path: "vendor", type: "tree", sha: "vendor-tree", mode: "040000" }]
+        : [
+            {
+              path: "logo.png",
+              type: "blob",
+              sha: "image",
+              mode: "100644",
+              size: 100,
+            },
+          ],
+    };
+  }
   if (route.startsWith("/git/ref/")) return { object: { sha: "a".repeat(40) } };
   if (route.startsWith("/git/commits/")) return { tree: { sha: "tree" } };
+  if (_name === "test/inventory" && route.startsWith("/git/trees/"))
+    return {
+      tree: Object.entries(inventory).map(([path, text]) => ({
+        path,
+        type: "blob",
+        mode: "100644",
+        sha: path,
+        size: text?.length ?? 1000000,
+      })),
+    };
+  if (_name === "test/inventory" && route.startsWith("/git/blobs/")) {
+    const text = inventory[route.slice("/git/blobs/".length)];
+    if (text == null)
+      throw new Error("Metadata-only asset or secret must never be downloaded");
+    return {
+      encoding: "base64",
+      content: Buffer.from(text).toString("base64"),
+    };
+  }
   if (route.startsWith("/git/trees/"))
     return {
       tree: Array.from(
@@ -35,6 +88,10 @@ export default {
   async fetch(req: Request, env: Env) {
     const s = new BatchedService(env),
       url = new URL(req.url);
+    if (url.pathname === "/inventory")
+      return Response.json(await s.connect(p, "test/inventory", "main", 1));
+    if (url.pathname === "/fallback")
+      return Response.json(await s.connect(p, "test/fallback", "main", 1));
     if (url.pathname === "/start")
       return Response.json(await s.connect(p, "test/repo", "main", 1));
     if (url.pathname === "/oversized")

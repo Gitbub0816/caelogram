@@ -1,7 +1,7 @@
 import { Service } from "../src/service.js";
 import { GitHub } from "../src/github.js";
 import { CloudStore } from "./store.js";
-import { assert, digest, Fault } from "../src/security.js";
+import { assert, digest, Fault, redact } from "../src/security.js";
 import { index, eligible, context } from "../src/graph.js";
 import type {
   Graph,
@@ -13,6 +13,14 @@ import type {
 import type { Env } from "./worker.js";
 import { availableRepositories } from "./onboarding.js";
 import { posix } from "node:path";
+import {
+  ANALYZER_VERSION,
+  exclusion,
+  fileNode,
+  extractPortable,
+  referencePaths,
+  type Reference,
+} from "../src/inventory.js";
 
 export const MAX_SOURCE_BYTES = 2_000_000_000;
 const MAX_FILE_BYTES = 256_000;
@@ -32,6 +40,7 @@ type Job = {
   owner: string;
   error: string | null;
   created: string;
+  analyzer_version: number;
 };
 type Repo = {
   tenant: string;
@@ -227,14 +236,25 @@ export class BatchedService extends Service<CloudStore> {
         "Repository deletion is in progress",
         409,
       );
-      if (["discovering", "indexing", "resolving"].includes(prior.phase))
-        return this.status(p, id);
+      if (["discovering", "indexing", "resolving"].includes(prior.phase)) {
+        if (prior.analyzer_version === ANALYZER_VERSION)
+          return this.status(p, id);
+        await this.q(
+          "UPDATE index_jobs SET phase='failed',owner=NULL,lease=0,error='Indexer upgraded; replacement inventory queued' WHERE tenant=? AND id=? AND phase IN ('discovering','indexing','resolving')",
+          p.tenant,
+          prior.id,
+        ).run();
+      }
     }
     const revision = await this.provider.head(name, branch, installationId),
       job = crypto.randomUUID();
     if (existing?.latest_job) {
       const previous = await this.job(p.tenant, existing.latest_job);
-      if (previous.phase === "failed" && previous.revision === revision) {
+      if (
+        previous.phase === "failed" &&
+        previous.revision === revision &&
+        previous.analyzer_version === ANALYZER_VERSION
+      ) {
         await this.q(
           "UPDATE index_jobs SET phase=CASE WHEN EXISTS(SELECT 1 FROM index_dirs WHERE tenant=? AND job=? AND done=0) THEN 'discovering' WHEN EXISTS(SELECT 1 FROM index_files WHERE tenant=? AND job=? AND done=0) THEN 'indexing' ELSE 'resolving' END,attempts=0,error=NULL,lease=0,owner=NULL WHERE tenant=? AND id=? AND phase='failed'",
           p.tenant,
@@ -269,7 +289,7 @@ export class BatchedService extends Service<CloudStore> {
         job,
       ),
       this.q(
-        "INSERT INTO index_jobs(tenant,id,repo,revision,created) VALUES(?,?,?,?,?)",
+        "INSERT INTO index_jobs(tenant,id,repo,revision,created,analyzer_version) VALUES(?,?,?,?,?,2)",
         p.tenant,
         job,
         id,
@@ -404,11 +424,12 @@ export class BatchedService extends Service<CloudStore> {
     for (const f of page) {
       const meta = JSON.parse(f.metadata);
       g.nodes.push(...meta.nodes);
+      g.warnings.push(...meta.warnings);
     }
     const paths = new Set(page.map((f) => f.path));
     for (const f of page) {
       const edges = await this.q(
-        'SELECT src AS "from",dst AS "to",kind,evidence FROM index_edges WHERE tenant=? AND job=? AND src=? LIMIT 201',
+        'SELECT src AS "from",dst AS "to",kind,evidence,confidence FROM index_edges WHERE tenant=? AND job=? AND src=? LIMIT 201',
         p.tenant,
         j.id,
         f.path,
@@ -416,7 +437,11 @@ export class BatchedService extends Service<CloudStore> {
       g.edges.push(
         ...edges.results
           .filter((e) => paths.has(e.to))
-          .map((e) => ({ ...e, confidence: 1, revision: j.revision })),
+          .map((e) => ({
+            ...e,
+            confidence: e.confidence ?? 1,
+            revision: j.revision,
+          })),
       );
     }
     const r = await this.record(p, id);
@@ -425,8 +450,9 @@ export class BatchedService extends Service<CloudStore> {
       nodes: g.nodes,
       edges: g.edges,
       warnings: [
+        ...g.warnings.slice(0, 30),
         `Showing ${page.length} of ${j.files} indexed files. Search or request another page; cross-page relationships are omitted from this view.`,
-        `${j.excluded} entries excluded by type, per-file size, or sensitive-path policy.`,
+        `${j.excluded} metadata-only entries retained; select a file to inspect its reason.`,
       ],
       nextCursor: rows.results.length > 50 ? page.at(-1)!.path : null,
       visibleFiles: page.length,
@@ -456,7 +482,7 @@ export class BatchedService extends Service<CloudStore> {
     for (let depth = 0; depth < 2; depth++) {
       for (const path of [...paths]) {
         const rows = await this.q(
-          'SELECT src AS "from",dst AS "to",kind,evidence FROM index_edges WHERE tenant=? AND job=? AND (src=? OR dst=?) LIMIT 201',
+          'SELECT src AS "from",dst AS "to",kind,evidence,confidence FROM index_edges WHERE tenant=? AND job=? AND (src=? OR dst=?) LIMIT 201',
           p.tenant,
           j.id,
           path,
@@ -470,7 +496,11 @@ export class BatchedService extends Service<CloudStore> {
         for (const e of rows.results) {
           paths.add(e.from);
           paths.add(e.to);
-          g.edges.push({ ...e, confidence: 1, revision: j.revision });
+          g.edges.push({
+            ...e,
+            confidence: e.confidence ?? 1,
+            revision: j.revision,
+          });
         }
         assert(
           paths.size <= 24,
@@ -488,7 +518,7 @@ export class BatchedService extends Service<CloudStore> {
         path,
       ).first<File>();
       if (!f) continue;
-      bytes += f.bytes;
+      bytes += f.blob ? f.bytes : 0;
       assert(
         bytes <= 4_000_000,
         "Context source exceeds 4 MB. Narrow the task.",
@@ -497,9 +527,10 @@ export class BatchedService extends Service<CloudStore> {
       const meta = JSON.parse(f.metadata);
       g.nodes.push(...meta.nodes);
       g.warnings.push(...meta.warnings);
-      const item = source
-        ? await this.store.get<SourceFile>(p.tenant, "index-source", f.blob)
-        : { path: f.path, sha: f.sha, content: "" };
+      const item =
+        source && f.blob
+          ? await this.store.get<SourceFile>(p.tenant, "index-source", f.blob)
+          : { path: f.path, sha: f.sha, content: "" };
       g.files.push(item);
     }
     g.edges = [
@@ -640,6 +671,11 @@ export class BatchedService extends Service<CloudStore> {
       path,
     ).first<{ blob: string }>();
     assert(f, "File not indexed", 404);
+    assert(
+      f.blob,
+      "File is metadata-only; source was not retained. Inspect its exclusion reason in the map.",
+      422,
+    );
     const item = await this.store.get<SourceFile>(
       p.tenant,
       "index-source",
@@ -710,8 +746,10 @@ export async function advanceIndex(env: Env, tenant: string, id: string) {
       );
     }
     const github = s.provider as GitHub;
-    // Keep a slice small even when all records are tiny. A queue message is just a job reference.
-    for (let count = 0; count < 5; count++) {
+    // Network-prefetch is bounded separately from sequential parsing and fenced persistence.
+    const prefetched = new Map<string, any>();
+    const started = Date.now();
+    for (let count = 0; count < 40 && Date.now() - started < 45000; count++) {
       j = await s.job(tenant, id);
       if (j.owner !== owner) return;
       if (j.phase === "deleting") {
@@ -847,11 +885,21 @@ export async function advanceIndex(env: Env, tenant: string, id: string) {
           ).run();
           continue;
         }
-        const tree = await github.api(
+        let recursive = dir.path === "";
+        let tree = await github.api(
           r.name,
           r.installation,
-          `/git/trees/${dir.sha}`,
+          `/git/trees/${dir.sha}${recursive ? "?recursive=1" : ""}`,
         );
+        // Large/truncated inventories fall back to checkpointed directories; never trust an incomplete listing.
+        if (recursive && (tree.truncated || tree.tree.length > 10000)) {
+          recursive = false;
+          tree = await github.api(
+            r.name,
+            r.installation,
+            `/git/trees/${dir.sha}`,
+          );
+        }
         assert(
           !tree.truncated,
           "GitHub truncated a directory tree; complete discovery cannot be guaranteed",
@@ -869,43 +917,46 @@ export async function advanceIndex(env: Env, tenant: string, id: string) {
         for (const e of tree.tree) {
           const path = dir.path ? dir.path + "/" + e.path : e.path;
           if (e.type === "tree") {
-            if (
-              /(^|\/)(node_modules|vendor|dist|build|\.git)(\/|$)/.test(path)
-            ) {
-              excluded++;
-              continue;
-            }
-            writes.push(
-              s.q(
-                `INSERT OR IGNORE INTO index_dirs(tenant,job,path,sha) SELECT ?,?,?,? WHERE ${fence}`,
-                tenant,
-                id,
-                path,
-                e.sha,
-                ...guard,
-              ),
-            );
-          } else if (
-            e.type === "blob" &&
-            ["100644", "100755"].includes(e.mode) &&
-            eligible(path) &&
-            Number.isSafeInteger(e.size) &&
-            e.size <= MAX_FILE_BYTES
-          ) {
-            bytes += e.size;
-            files++;
-            writes.push(
-              s.q(
-                `INSERT OR IGNORE INTO index_files(tenant,job,path,sha,bytes) SELECT ?,?,?,?,? WHERE ${fence}`,
-                tenant,
-                id,
-                path,
-                e.sha,
-                e.size,
-                ...guard,
-              ),
-            );
-          } else excluded++;
+            if (!recursive)
+              writes.push(
+                s.q(
+                  `INSERT OR IGNORE INTO index_dirs(tenant,job,path,sha) SELECT ?,?,?,? WHERE ${fence}`,
+                  tenant,
+                  id,
+                  path,
+                  e.sha,
+                  ...guard,
+                ),
+              );
+            continue;
+          }
+          const reason = exclusion(path, e.size, e.mode, e.type);
+          const meta = reason
+            ? JSON.stringify({
+                nodes: [fileNode(path, e.size || 0, reason)],
+                warnings: [path + ": " + reason],
+                imports: [],
+                references: [],
+                analyzerVersion: ANALYZER_VERSION,
+              })
+            : null;
+          files++;
+          if (reason) excluded++;
+          else bytes += e.size;
+          writes.push(
+            s.q(
+              `INSERT OR IGNORE INTO index_files(tenant,job,path,sha,bytes,metadata,done,resolved) SELECT ?,?,?,?,?,?,?,? WHERE ${fence}`,
+              tenant,
+              id,
+              path,
+              e.sha,
+              e.size || 0,
+              meta,
+              reason ? 1 : 0,
+              reason ? 1 : 0,
+              ...guard,
+            ),
+          );
         }
         assert(
           j.bytes + bytes <= MAX_SOURCE_BYTES,
@@ -914,7 +965,7 @@ export async function advanceIndex(env: Env, tenant: string, id: string) {
         );
         assert(
           j.files + files <= 100000,
-          "Repository exceeds 100,000 eligible files",
+          "Repository exceeds 100,000 inventory entries",
           413,
         );
         // Split D1 batches; retries insert idempotently, counts commit with the directory marker.
@@ -928,9 +979,11 @@ export async function advanceIndex(env: Env, tenant: string, id: string) {
             dir.path,
           ),
           checkpoint(
-            "UPDATE index_jobs SET bytes=bytes+?,files=files+?,excluded=excluded+? WHERE tenant=? AND id=?",
+            "UPDATE index_jobs SET bytes=bytes+?,files=files+?,excluded=excluded+?,done=done+?,resolved=resolved+? WHERE tenant=? AND id=?",
             bytes,
             files,
+            excluded,
+            excluded,
             excluded,
             tenant,
             id,
@@ -963,7 +1016,10 @@ export async function advanceIndex(env: Env, tenant: string, id: string) {
               )
               .first<File>()
           : null;
-        if (cached) {
+        if (
+          cached?.blob &&
+          JSON.parse(cached.metadata).analyzerVersion === ANALYZER_VERSION
+        ) {
           await env.DB.batch([
             checkpoint(
               "UPDATE index_files SET done=1,blob=?,metadata=? WHERE tenant=? AND job=? AND path=?",
@@ -982,11 +1038,26 @@ export async function advanceIndex(env: Env, tenant: string, id: string) {
           ]);
           continue;
         }
-        const b = await github.api(
-          r.name,
-          r.installation,
-          `/git/blobs/${f.sha}`,
-        );
+        if (!prefetched.has(f.sha)) {
+          const pending = await s
+            .q(
+              "SELECT sha FROM index_files WHERE tenant=? AND job=? AND done=0 ORDER BY path LIMIT 8",
+              tenant,
+              id,
+            )
+            .all<{ sha: string }>();
+          const shas = [...new Set(pending.results.map((v) => v.sha))];
+          const responses = await Promise.allSettled(
+            shas.map((sha) =>
+              github.api(r.name, r.installation, `/git/blobs/${sha}`),
+            ),
+          );
+          responses.forEach((result, n) => prefetched.set(shas[n], result));
+        }
+        const response = prefetched.get(f.sha);
+        prefetched.delete(f.sha);
+        if (response.status === "rejected") throw response.reason;
+        const b = response.value;
         assert(
           b.encoding === "base64" && b.content.length <= 400000,
           "Unexpected or oversized source blob",
@@ -999,17 +1070,69 @@ export async function advanceIndex(env: Env, tenant: string, id: string) {
           413,
         );
         const imports: string[] = [];
-        const g = index(
-          [{ path: f.path, sha: f.sha, content }],
-          j.revision,
-          undefined,
-          { maxNodes: 500, maxEdges: 1000 },
-          (spec) => imports.push(spec),
-        );
-        assert(
-          j.symbols + g.nodes.length - 1 <= 1_000_000,
-          "Repository exceeds one million extracted symbols",
-          413,
+        const binary =
+          content.includes("\0") ||
+          Buffer.from(content, "utf8").compare(
+            Buffer.from(b.content, "base64"),
+          ) !== 0;
+        if (binary) {
+          const reason =
+            "Non-UTF-8 or binary content detected; source not persisted";
+          const metadata = JSON.stringify({
+            nodes: [fileNode(f.path, f.bytes, reason)],
+            warnings: [f.path + ": " + reason],
+            imports: [],
+            references: [],
+            analyzerVersion: ANALYZER_VERSION,
+          });
+          await env.DB.batch([
+            checkpoint(
+              "UPDATE index_files SET done=1,resolved=1,metadata=? WHERE tenant=? AND job=? AND path=?",
+              metadata,
+              tenant,
+              id,
+              f.path,
+            ),
+            checkpoint(
+              "UPDATE index_jobs SET done=done+1,resolved=resolved+1,excluded=excluded+1 WHERE tenant=? AND id=?",
+              tenant,
+              id,
+            ),
+          ]);
+          continue;
+        }
+        let g: Graph;
+        try {
+          g = index(
+            [{ path: f.path, sha: f.sha, content }],
+            j.revision,
+            undefined,
+            { maxNodes: 2000, maxEdges: 4000 },
+            (spec) => imports.push(spec),
+          );
+          if (j.symbols + g.nodes.length - 1 > 1_000_000)
+            throw new Fault(413, "Revision symbol detail limit");
+        } catch (error) {
+          if (!(error instanceof Fault && error.status === 413)) throw error;
+          g = empty(j.revision);
+          g.nodes = [{ ...fileNode(f.path, f.bytes), analysis: "limited" }];
+          g.files = [{ path: f.path, sha: f.sha, content: redact(content) }];
+          g.warnings = [
+            f.path +
+              ": symbol detail limit reached. File retained, analysis incomplete; no completeness claim.",
+          ];
+        }
+        const portable = extractPortable(f.path, content);
+        Object.assign(g.nodes[0], {
+          bytes: f.bytes,
+          analysis:
+            g.nodes[0].analysis ||
+            (/\.[cm]?[jt]sx?$/.test(f.path)
+              ? "typescript-ast"
+              : portable.analyzer),
+        });
+        g.warnings.push(
+          ...portable.warnings.filter((w) => !g.warnings.includes(w)),
         );
         const blob = digest([id, f.path, owner]);
         const registration = await s
@@ -1023,16 +1146,27 @@ export async function advanceIndex(env: Env, tenant: string, id: string) {
           .run();
         if (!registration.meta.changes) return;
         await s.store.put(tenant, "index-source", { id: blob, ...g.files[0] });
-        const metadata = JSON.stringify({
+        let metadata = JSON.stringify({
           nodes: g.nodes,
           warnings: g.warnings,
           imports: [...new Set(imports)],
+          references: portable.references,
+          analyzer: portable.analyzer,
+          analyzerVersion: ANALYZER_VERSION,
         });
-        assert(
-          Buffer.byteLength(metadata) <= 500000,
-          "File metadata exceeds parser budget",
-          413,
-        );
+        if (Buffer.byteLength(metadata) > 500000) {
+          g.nodes = [{ ...fileNode(f.path, f.bytes), analysis: "limited" }];
+          metadata = JSON.stringify({
+            nodes: g.nodes,
+            warnings: [
+              f.path +
+                ": metadata detail limit reached; file retained with incomplete analysis",
+            ],
+            imports: [],
+            references: [],
+            analyzerVersion: ANALYZER_VERSION,
+          });
+        }
         await env.DB.batch([
           checkpoint(
             "UPDATE index_files SET done=1,blob=?,metadata=? WHERE tenant=? AND job=? AND path=?",
@@ -1102,6 +1236,49 @@ export async function advanceIndex(env: Env, tenant: string, id: string) {
                 ...guard,
               )
               .run();
+        }
+        for (const ref of (JSON.parse(f.metadata).references ||
+          []) as Reference[]) {
+          const sourcePath = ref.from || f.path;
+          if (
+            ref.from &&
+            !(await s
+              .q(
+                "SELECT 1 FROM index_files WHERE tenant=? AND job=? AND path=?",
+                tenant,
+                id,
+                ref.from,
+              )
+              .first())
+          )
+            continue;
+          const options = ref.from
+            ? [ref.value.slice(1)]
+            : referencePaths(f.path, ref.value);
+          if (!options.length) continue;
+          const found = await s
+            .q(
+              `SELECT path FROM index_files WHERE tenant=? AND job=? AND path IN (${options.map(() => "?").join(",")})`,
+              tenant,
+              id,
+              ...options,
+            )
+            .all<{ path: string }>();
+          for (const target of found.results)
+            if (target.path !== sourcePath)
+              await s
+                .q(
+                  `INSERT OR IGNORE INTO index_edges(tenant,job,src,dst,kind,evidence,confidence) SELECT ?,?,?,?,?,?,? WHERE ${fence}`,
+                  tenant,
+                  id,
+                  sourcePath,
+                  target.path,
+                  ref.kind,
+                  ref.evidence,
+                  ref.confidence,
+                  ...guard,
+                )
+                .run();
         }
         await env.DB.batch([
           checkpoint(

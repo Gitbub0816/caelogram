@@ -1,5 +1,7 @@
 # Background indexing
 
+Inventory and throughput behavior is updated by migration 0005; see [Inventory and performance](inventory-and-performance.md) for current coverage and limits. The details below describe the original 0004 implementation.
+
 Repository connection now creates a D1 job and returns progress immediately. The cloud path does not download or serialize a complete repository. Cloudflare Queues runs five bounded work items per invocation; the existing minute cron also acts as a durable outbox/recovery scanner. A failed queue notification cannot lose a D1 job.
 
 ## Deployment

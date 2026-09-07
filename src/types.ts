@@ -12,6 +12,10 @@ export interface Component {
   end: number;
   subsystem: string;
   exported: boolean;
+  bytes?: number;
+  analysis?: string;
+  exclusionReason?: string;
+  confidence?: number;
 }
 export interface Relation {
   from: string;

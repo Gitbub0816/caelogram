@@ -1,4 +1,5 @@
 import ts from "typescript";
+import { exclusion, extractPortable } from "./inventory.js";
 import path from "node:path";
 import { digest, redact, safePath, sensitivePath, Fault } from "./security.js";
 import type {
@@ -9,14 +10,7 @@ import type {
   Context,
 } from "./types.js";
 const code = /\.[cm]?[jt]sx?$/;
-const supported = /\.(?:[cm]?[jt]sx?|json|sql|md|ya?ml|toml|css|html)$/;
-export const eligible = (p: string) =>
-  safePath(p) &&
-  !sensitivePath(p) &&
-  supported.test(p) &&
-  !/(^|\/)(node_modules|vendor|dist|build|\.git)(\/|$)|(?:package-lock|pnpm-lock|yarn\.lock)/.test(
-    p,
-  );
+export const eligible = (p: string) => exclusion(p, 0) === null;
 export const tokens = (s: string) =>
   Math.ceil(Buffer.byteLength(s, "utf8") / 3); // Estimate, not model billing.
 export function index(
@@ -112,7 +106,20 @@ export function index(
       (n) => n.path === file.path && n.kind !== "file",
     ))
       edge(file.path, n.id, "contains", `AST declaration at line ${n.start}`);
-    if (!source) continue;
+    if (!source) {
+      const extracted = extractPortable(file.path, file.content);
+      nodes.push(...extracted.nodes);
+      warnings.push(...extracted.warnings);
+      for (const n of extracted.nodes)
+        edge(
+          file.path,
+          n.id,
+          "contains",
+          `Lexical declaration at line ${n.start}`,
+          n.confidence ?? 0.8,
+        );
+      continue;
+    }
     // Always resolve imports against the new file set: a newly added module can resolve an old import.
     const resolve = (specifier: string) => {
       onImport?.(specifier);
