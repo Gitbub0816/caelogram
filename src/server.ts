@@ -25,7 +25,7 @@ function routeTemplate(url: string) {
   return url
     .replace(/^(\/api\/tools\/[a-z_]+).*$/, "$1")
     .replace(
-      /^(\/api\/(?:galaxy|component|history|repositories|agent-tokens))\/.+$/,
+      /^(\/api\/(?:galaxy|component|history|repositories|agent-tokens|oauth-grants))\/.+$/,
       "$1/:id",
     )
     .slice(0, 120);

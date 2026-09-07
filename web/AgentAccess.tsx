@@ -1,5 +1,14 @@
 import { useEffect, useState } from "react";
 import type { Identity } from "./Auth";
+type Grant = {
+  id: string;
+  client: string;
+  clientUri: string | null;
+  scopes: string[];
+  authorizedAt: string;
+  lastIssuedAt: string | null;
+  activeTokens: number;
+};
 type Token = {
   id: string;
   label: string;
@@ -9,6 +18,7 @@ type Token = {
 };
 export default function AgentAccess({ identity }: { identity: Identity }) {
   const [tokens, setTokens] = useState<Token[]>([]),
+    [grants, setGrants] = useState<Grant[]>([]),
     [repos, setRepos] = useState<{ name: string }[]>([]),
     [selected, setSelected] = useState<string[]>([]),
     [label, setLabel] = useState("My coding agent"),
@@ -46,6 +56,13 @@ export default function AgentAccess({ identity }: { identity: Identity }) {
     void act(async () => {
       setTokens(await api("/api/agent-tokens"));
       setRepos((await api("/api/github/repositories")).repositories);
+      // An older deployment has no grant table; an empty list is the honest
+      // answer there, not an error worth blocking the page for.
+      try {
+        setGrants((await api("/api/oauth-grants")).grants);
+      } catch {
+        setGrants([]);
+      }
     });
   }, []);
   return (
@@ -192,6 +209,54 @@ export default function AgentAccess({ identity }: { identity: Identity }) {
             }
           >
             Revoke
+          </button>
+        </div>
+      ))}
+      <h3>Connected applications</h3>
+      <p>
+        Applications you signed in to through Caelogram — a coding agent, an MCP
+        client, the CLI. Revoking one immediately invalidates every token it
+        holds; the application has to ask for your consent again.
+      </p>
+      {!grants.length && (
+        <p className="muted">
+          No application has been authorized yet. Connect one from your MCP
+          client or run <code>caelogram login</code>.
+        </p>
+      )}
+      {grants.map((g) => (
+        <div className="connect-step" key={g.id}>
+          <strong>
+            {g.clientUri ? (
+              <a href={g.clientUri} target="_blank" rel="noreferrer">
+                {g.client}
+              </a>
+            ) : (
+              g.client
+            )}
+          </strong>
+          <p>
+            {g.scopes.length ? g.scopes.join(", ") : "no scopes"} ·{" "}
+            {g.activeTokens === 0
+              ? "no active token"
+              : `${g.activeTokens} active ${g.activeTokens === 1 ? "token" : "tokens"}`}
+          </p>
+          <p>
+            Authorized {new Date(g.authorizedAt).toLocaleString()}
+            {g.lastIssuedAt &&
+              ` · last token ${new Date(g.lastIssuedAt).toLocaleString()}`}
+          </p>
+          <button
+            className="danger"
+            disabled={busy}
+            onClick={() =>
+              void act(async () => {
+                await api("/api/oauth-grants/" + g.id, "DELETE");
+                setGrants(grants.filter((x) => x.id !== g.id));
+              })
+            }
+          >
+            Revoke access
           </button>
         </div>
       ))}

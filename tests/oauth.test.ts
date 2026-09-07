@@ -841,3 +841,97 @@ test("the shipped CLI client drives this server end to end, per docs/cli-auth-co
     await h.dispose();
   }
 });
+
+test("the console lists a person's own grants and revokes only those", async (t) => {
+  const h = await harness(t);
+  try {
+    const client = await registerClient(h);
+    const authorizeUrl =
+      `/authorize?response_type=code&client_id=${client.client_id}` +
+      `&redirect_uri=${encodeURIComponent("https://client.test/callback")}` +
+      `&scope=read+write&code_challenge=${challenge}&code_challenge_method=S256`;
+
+    const mine = await h.cookie("user_owner");
+    const theirs = await h.cookie("user_other");
+    const redirect = await approve(h, authorizeUrl, mine);
+    await approve(h, authorizeUrl, theirs);
+
+    // Exchange, so the grant has a live access token to report and to kill.
+    const exchange = await h.fetch(
+      "/token",
+      formInit({
+        grant_type: "authorization_code",
+        code: redirect.searchParams.get("code")!,
+        client_id: client.client_id,
+        redirect_uri: "https://client.test/callback",
+        code_verifier: verifier,
+      }),
+    );
+    assert.equal(exchange.status, 200);
+    const access = ((await exchange.json()) as any).access_token as string;
+
+    const bearer = (cookie: string) => ({
+      Authorization: `Bearer ${cookie.slice("__session=".length)}`,
+    });
+    const listed = async (cookie: string) => {
+      const r = await h.fetch("/api/oauth-grants", { headers: bearer(cookie) });
+      assert.equal(r.status, 200);
+      return ((await r.json()) as any).grants as any[];
+    };
+
+    // Each person sees exactly one grant — their own — even though both
+    // authorized the same client.
+    const ours = await listed(mine);
+    assert.equal(ours.length, 1);
+    assert.equal(ours[0].client, "Test MCP Client");
+    assert.deepEqual(ours[0].scopes, ["read", "write"]);
+    assert.equal(ours[0].activeTokens, 1);
+    const others = await listed(theirs);
+    assert.equal(others.length, 1);
+    assert.notEqual(others[0].id, ours[0].id);
+
+    // Someone else's grant id is not revocable, and stays listed for its owner.
+    const forged = await h.fetch(`/api/oauth-grants/${ours[0].id}`, {
+      method: "DELETE",
+      headers: bearer(theirs),
+    });
+    assert.equal(forged.status, 404);
+    assert.equal((await listed(mine)).length, 1);
+
+    // The owner's revocation lands, and the live access token dies with it.
+    const before = await h.fetch("/api/tools/list_repositories", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${access}`,
+        "Content-Type": "application/json",
+      },
+      body: "{}",
+    });
+    assert.notEqual(before.status, 401);
+    const revoked = await h.fetch(`/api/oauth-grants/${ours[0].id}`, {
+      method: "DELETE",
+      headers: bearer(mine),
+    });
+    assert.equal(revoked.status, 200);
+    assert.equal((await listed(mine)).length, 0);
+    assert.equal((await listed(theirs)).length, 1);
+    const after = await h.fetch("/api/tools/list_repositories", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${access}`,
+        "Content-Type": "application/json",
+      },
+      body: "{}",
+    });
+    assert.equal(after.status, 401);
+
+    // Revoking twice is not found the second time, never a silent success.
+    const again = await h.fetch(`/api/oauth-grants/${ours[0].id}`, {
+      method: "DELETE",
+      headers: bearer(mine),
+    });
+    assert.equal(again.status, 404);
+  } finally {
+    await h.dispose();
+  }
+});
