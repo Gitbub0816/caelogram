@@ -33,13 +33,23 @@ Production access tokens must be signed RS256/ES256 JWTs from the configured iss
 
 The timestamps above are schema illustrations, not usable tokens. Tokens older than one hour are rejected. `publish` is a separate scope; `admin` grants all current capabilities and should not be the normal agent scope. Avoid wildcard repository grants outside administration. The server validates token signature, issuer, audience, tenant, subject, and expiry, and all resource lookups enforce repository grants.
 
-The external authorization server must implement the actual OAuth/PKCE/registration/user-login flow compatible with target MCP clients. Caelogram serves protected-resource metadata; it does not mint production access tokens. Browser token entry and CLI environment-token login are functional alpha fallbacks. Immediate revocation/introspection, organization roles, and refresh UX remain launch gates.
+The external authorization server must implement the actual OAuth/PKCE/registration/user-login flow compatible with target MCP clients. Caelogram serves protected-resource metadata; it does not mint production access tokens. Browser token entry and the CLI's `CAELOGRAM_TOKEN` environment fallback are functional alpha paths. Immediate revocation/introspection and organization roles remain launch gates.
+
+### CLI device authorization
+
+`caelogram login` implements the OAuth 2.0 device authorization grant (RFC 8628) and refreshes access tokens automatically; `caelogram logout` revokes and clears them. The client is complete and unit-tested, but **no Caelogram deployment answers those endpoints yet**. To turn it on, an authorization server must serve `/.well-known/oauth-authorization-server` with `device_authorization_endpoint`, `token_endpoint`, and preferably `revocation_endpoint`, register the public client `caelogram-cli`, and host the user-code verification page. The precise request/response and error contract is in [CLI authorization contract](cli-auth-contract.md); implement against that document rather than reading the client. Until it exists, operators issue scoped agent tokens in the console and supply them as `CAELOGRAM_TOKEN`.
 
 ## Data
 
 Set `CAELOGRAM_DATA_KEY` to 32 cryptographically random bytes encoded as 64 hex characters. Do not reuse the GitHub key. Production source-bearing object payloads are AES-GCM encrypted; metadata IDs/audit actions are plaintext. Mount a writable `/data` volume for the Docker image, encrypted by the host/provider. Back up SQLite consistently using SQLite backup tools; copying an active DB without its WAL is not an acceptable backup procedure. Keep keys outside backups and practice restore/decryption before accepting private code.
 
 Only one instance may own this SQLite deployment and worker. No multi-replica deployment is supported. Backups, retention of prior snapshots, and key rotation require an operator runbook until automated controls ship. Repository deletion removes live snapshots/tasks/changesets but keeps audit metadata and does not remove historical backups automatically. The feature does not delete the GitHub repository or PRs.
+
+## Publish the CLI to npm
+
+The npm package `caelogram` is the CLI only. `npm run build:cli` bundles `src/cli.ts` into one dependency-free executable and stages `dist/package/` with a generated manifest — the repository root is never published, because its `dependencies` are the server and console runtime (React, Express, the MCP SDK) that a CLI user must not download. `npm run pack:cli` produces the tarball for inspection; `npm run publish:cli` publishes it. A root `npm publish` is refused by a `prepublishOnly` guard.
+
+Releases are automated: pushing a `v<version>` tag runs `.github/workflows/release.yml`, which requires `npm run check`, `npm run check:cloud`, `npm test`, and `npm run build` to pass, verifies the tag matches `package.json`, then publishes with `--provenance`. It needs one repository secret, `NPM_TOKEN` (an npm automation token with publish rights), and the workflow's `id-token: write` permission for the provenance attestation. Choose and record a license before the first publish; the manifest currently says `UNLICENSED`.
 
 ## Deploy the built service
 

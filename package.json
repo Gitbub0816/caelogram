@@ -1,18 +1,43 @@
 {
   "name": "caelogram",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
-  "description": "The living map between your AI and your code",
+  "description": "Command-line client for Caelogram: map an existing Git checkout, obtain bounded task context, and publish draft pull requests through the Caelogram service.",
+  "license": "UNLICENSED",
+  "homepage": "https://github.com/Gitbub0816/caelogram#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Gitbub0816/caelogram.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Gitbub0816/caelogram/issues"
+  },
+  "keywords": [
+    "caelogram",
+    "cli",
+    "mcp",
+    "code-context",
+    "repository-map",
+    "ai-agents",
+    "github",
+    "typescript"
+  ],
   "engines": {
     "node": ">=24.0.0"
   },
   "bin": {
     "caelogram": "dist/cli.js"
   },
+  "files": [
+    "dist/cli.js"
+  ],
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "tsc && vite build && npm run build:cli",
+    "build:cli": "node --import tsx scripts/build-cli.ts",
+    "pack:cli": "npm run build:cli && npm pack ./dist/package",
+    "publish:cli": "npm run build:cli && npm publish ./dist/package --provenance --access public",
+    "prepublishOnly": "node -e \"console.error('Publish the CLI package with: npm run publish:cli (the repository root carries server dependencies).'); process.exit(1)\"",
     "start": "node dist/server.js",
     "test": "node --import tsx --test tests/*.test.ts",
     "check": "tsc --noEmit && tsc -p tsconfig.web.json --noEmit",

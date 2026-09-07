@@ -5,6 +5,7 @@ import {
   writeFileSync,
   mkdirSync,
   existsSync,
+  rmSync,
   chmodSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -12,21 +13,97 @@ import { resolve, dirname } from "node:path";
 import { mapExistingRepository } from "./local.js";
 import { context } from "./graph.js";
 import { assert } from "./security.js";
+import {
+  DEFAULT_CLIENT_ID,
+  DEFAULT_SCOPE,
+  deviceLogin,
+  discover,
+  expired,
+  liveDeps,
+  refreshCredentials,
+  revokeToken,
+  type Credentials,
+  type ServerMetadata,
+} from "./auth.js";
 import { z } from "zod";
+
+const VERSION = "0.1.0";
+const DEFAULT_URL = "http://localhost:4310";
 const configPath = resolve(homedir(), ".config/caelogram/config.json");
-const config = () =>
+
+type Config = {
+  url?: string;
+  clientId?: string;
+  metadata?: ServerMetadata;
+  credentials?: Credentials;
+  /** Legacy field written by the pre-OAuth environment-token login. */
+  token?: string;
+};
+
+const config = (): Config =>
   existsSync(configPath) ? JSON.parse(readFileSync(configPath, "utf8")) : {};
-const print = (v: unknown) => console.log(JSON.stringify(v, null, 2));
-async function call(name: string, input: unknown) {
-  const c = config(),
-    url = process.env.CAELOGRAM_URL ?? c.url ?? "http://localhost:4310",
-    token = process.env.CAELOGRAM_TOKEN ?? c.token;
-  assert(token, "Run caelogram login or set CAELOGRAM_TOKEN");
+
+function save(next: Config) {
+  mkdirSync(dirname(configPath), { recursive: true, mode: 0o700 });
+  writeFileSync(configPath, JSON.stringify(next, null, 2), { mode: 0o600 });
+  chmodSync(configPath, 0o600);
+}
+
+const serviceUrl = (c: Config = config()) =>
+  process.env.CAELOGRAM_URL ?? c.url ?? DEFAULT_URL;
+
+const clientId = (c: Config = config()) =>
+  process.env.CAELOGRAM_CLIENT_ID ?? c.clientId ?? DEFAULT_CLIENT_ID;
+
+function requireServiceTransport(url: string) {
   const u = new URL(url);
   assert(
-    u.protocol === "https:" || ["localhost", "127.0.0.1"].includes(u.hostname),
+    u.protocol === "https:" ||
+      ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname),
     "Remote service requires HTTPS",
   );
+}
+
+/**
+ * The bearer token for an API call. `CAELOGRAM_TOKEN` wins so CI can run
+ * non-interactively; otherwise the stored OAuth access token is used and
+ * silently refreshed when it is about to expire.
+ */
+async function accessToken(): Promise<string> {
+  if (process.env.CAELOGRAM_TOKEN) return process.env.CAELOGRAM_TOKEN;
+  const c = config();
+  const deps = liveDeps();
+  if (c.credentials?.accessToken) {
+    if (!expired(c.credentials, deps)) return c.credentials.accessToken;
+    assert(
+      c.credentials.refreshToken,
+      "The stored access token expired; run caelogram login",
+      401,
+    );
+    const metadata = c.metadata ?? (await discover(serviceUrl(c), deps));
+    const credentials = await refreshCredentials(
+      metadata,
+      clientId(c),
+      c.credentials.refreshToken,
+      deps,
+    );
+    save({ ...c, metadata, credentials });
+    return credentials.accessToken;
+  }
+  assert(
+    c.token,
+    "Run caelogram login, or set CAELOGRAM_TOKEN for non-interactive use",
+    401,
+  );
+  return c.token;
+}
+
+const print = (v: unknown) => console.log(JSON.stringify(v, null, 2));
+
+async function call(name: string, input: unknown) {
+  const url = serviceUrl();
+  const token = await accessToken();
+  requireServiceTransport(url);
   const response = await fetch(`${url}/api/tools/${name}`, {
     method: "POST",
     headers: {
@@ -40,44 +117,74 @@ async function call(name: string, input: unknown) {
   assert(response.ok, body.error ?? "Request failed", response.status);
   return body;
 }
+
 const program = new Command()
   .name("caelogram")
   .description("The living map between your AI and your code.")
-  .version("0.1.0");
+  .version(VERSION);
+
 program
   .command("login")
-  .option("--url <url>", "Service origin", "http://localhost:4310")
+  .option("--url <url>", "Service origin", DEFAULT_URL)
+  .option("--scope <scope>", "Requested scope", DEFAULT_SCOPE)
+  .option("--client-id <id>", "OAuth client identifier", DEFAULT_CLIENT_ID)
   .description(
-    "Read an issued Caelogram access token from CAELOGRAM_TOKEN; never a GitHub token",
+    "Authenticate through the OAuth 2.0 device authorization grant. " +
+      "For CI, set CAELOGRAM_TOKEN instead of logging in; it overrides stored credentials.",
   )
-  .action(async ({ url }) => {
-    const token = process.env.CAELOGRAM_TOKEN;
-    assert(
-      token,
-      "Set CAELOGRAM_TOKEN to a token from the console’s Access & integrations → Agent access",
-    );
-    const u = new URL(url);
-    assert(
-      u.protocol === "https:" ||
-        ["localhost", "127.0.0.1"].includes(u.hostname),
-      "Remote service requires HTTPS",
-    );
-    const r = await fetch(`${url}/api/tools/list_repositories`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: "{}",
-    });
-    assert(r.ok, "Token was not accepted");
-    mkdirSync(dirname(configPath), { recursive: true, mode: 0o700 });
-    writeFileSync(configPath, JSON.stringify({ url, token }), { mode: 0o600 });
-    chmodSync(configPath, 0o600);
+  .action(async (o) => {
+    const url = String(o.url).replace(/\/$/, "");
+    requireServiceTransport(url);
+    const deps = liveDeps();
+    const id = process.env.CAELOGRAM_CLIENT_ID ?? o.clientId;
+    const { metadata, credentials } = await deviceLogin(url, id, o.scope, deps);
+    save({ url, clientId: id, metadata, credentials });
     console.log(
-      "Authenticated. Credentials stored with owner-only file permissions.",
+      "Authenticated. Credentials stored with owner-only file permissions at " +
+        configPath,
     );
   });
+
+program
+  .command("logout")
+  .description("Revoke the stored tokens and delete the local credential file")
+  .action(async () => {
+    const c = config();
+    if (!existsSync(configPath)) return console.log("No stored credentials.");
+    const deps = liveDeps();
+    let revoked = false;
+    if (c.credentials?.accessToken) {
+      const metadata =
+        c.metadata ?? (await discover(serviceUrl(c), deps).catch(() => null));
+      if (metadata) {
+        const id = clientId(c);
+        if (c.credentials.refreshToken)
+          revoked =
+            (await revokeToken(
+              metadata,
+              id,
+              c.credentials.refreshToken,
+              "refresh_token",
+              deps,
+            )) || revoked;
+        revoked =
+          (await revokeToken(
+            metadata,
+            id,
+            c.credentials.accessToken,
+            "access_token",
+            deps,
+          )) || revoked;
+      }
+    }
+    rmSync(configPath, { force: true });
+    console.log(
+      revoked
+        ? "Tokens revoked and local credentials removed."
+        : "Local credentials removed. The server exposed no revocation endpoint, so tokens remain valid until they expire.",
+    );
+  });
+
 program
   .command("connect <repository>")
   .requiredOption(
@@ -199,10 +306,7 @@ program
     "Print integration configuration; does not overwrite agent settings",
   )
   .action(({ client }) => {
-    const c = config(),
-      url =
-        (process.env.CAELOGRAM_URL ?? c.url ?? "http://localhost:4310") +
-        "/mcp";
+    const url = serviceUrl() + "/mcp";
     if (client === "codex")
       console.log(
         `[mcp_servers.caelogram]\nurl = ${JSON.stringify(url)}\nbearer_token_env_var = "CAELOGRAM_TOKEN"`,
@@ -225,11 +329,25 @@ program
   });
 program.command("doctor").action(async () => {
   const c = config();
+  const credentials = c.credentials;
   print({
+    version: VERSION,
     node: process.version,
     nodeSupported: Number(process.versions.node.split(".")[0]) >= 24,
-    service: process.env.CAELOGRAM_URL ?? c.url ?? "http://localhost:4310",
-    tokenConfigured: !!(process.env.CAELOGRAM_TOKEN ?? c.token),
+    service: serviceUrl(c),
+    configPath: existsSync(configPath) ? configPath : null,
+    authentication: process.env.CAELOGRAM_TOKEN
+      ? "CAELOGRAM_TOKEN environment variable"
+      : credentials
+        ? "OAuth device grant"
+        : c.token
+          ? "legacy stored token"
+          : "none",
+    accessTokenExpiresAt: credentials?.expiresAt
+      ? new Date(credentials.expiresAt).toISOString()
+      : null,
+    refreshTokenStored: !!credentials?.refreshToken,
+    authorizationServer: c.metadata?.issuer ?? null,
     githubCredentialsRequiredInClient: false,
   });
 });
