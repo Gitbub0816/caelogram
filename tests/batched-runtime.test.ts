@@ -46,6 +46,67 @@ test("bundled workerd runtime completes 24 MB as independently checkpointed requ
         .trim()
         .split("\n"))
         await db.prepare(sql).run();
+    const inventoryStart = (await (
+      await mf.dispatchFetch("https://test/inventory")
+    ).json()) as any;
+    let inventoryStatus = inventoryStart;
+    for (let n = 0; n < 20 && inventoryStatus.status !== "ready"; n++) {
+      const response = await mf.dispatchFetch(
+        "https://test/step?id=" + inventoryStart.id,
+      );
+      assert.equal(response.status, 200, await response.clone().text());
+      inventoryStatus = await response.json();
+    }
+    assert.equal(inventoryStatus.status, "ready");
+    assert.equal(inventoryStatus.files, 7);
+    assert.equal(inventoryStatus.excluded, 2);
+    const inventoryMap = (await (
+      await mf.dispatchFetch("https://test/map?id=" + inventoryStart.id)
+    ).json()) as any;
+    assert(
+      inventoryMap.nodes.some(
+        (n: any) => n.path === "logo.png" && n.exclusionReason,
+      ),
+    );
+    assert(
+      inventoryMap.nodes.some(
+        (n: any) => n.name === "Main" && n.kind === "class",
+      ),
+    );
+    assert(
+      inventoryMap.nodes.some(
+        (n: any) => n.path === "dense.ts" && n.analysis === "limited",
+      ),
+    );
+    assert(
+      inventoryMap.edges.some(
+        (e: any) =>
+          e.from === "app.custom" && e.to === "logo.png" && e.confidence < 1,
+      ),
+    );
+    assert(
+      inventoryMap.edges.some(
+        (e: any) => e.from === "App/App.csproj" && e.to === "Core/Core.csproj",
+      ),
+    );
+    const fallbackStart = (await (
+      await mf.dispatchFetch("https://test/fallback")
+    ).json()) as any;
+    let fallbackStatus = fallbackStart;
+    for (let n = 0; n < 10 && fallbackStatus.status !== "ready"; n++)
+      fallbackStatus = await (
+        await mf.dispatchFetch("https://test/step?id=" + fallbackStart.id)
+      ).json();
+    assert.equal(fallbackStatus.status, "ready");
+    assert.equal(fallbackStatus.files, 1);
+    const fallbackMap = (await (
+      await mf.dispatchFetch("https://test/map?id=" + fallbackStart.id)
+    ).json()) as any;
+    assert(
+      fallbackMap.nodes.some(
+        (n: any) => n.path === "vendor/logo.png" && n.exclusionReason,
+      ),
+    );
     const start = (await (
       await mf.dispatchFetch("https://test/start")
     ).json()) as any;

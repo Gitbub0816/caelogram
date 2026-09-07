@@ -264,6 +264,24 @@ export class Service<S extends Storage = Store> {
     assert(c.status !== "published", "Published changesets are immutable", 409);
     const errors: string[] = [],
       warnings: string[] = [];
+    warnings.push(
+      ...g.warnings
+        .filter((w) => /incomplete|lexical|Roslyn|metadata|limit/i.test(w))
+        .slice(0, 20),
+    );
+    for (const edit of c.edits) {
+      const node = g.nodes.find(
+        (n) => n.path === edit.path && n.kind === "file",
+      );
+      if (node?.analysis === "metadata-only")
+        errors.push(
+          `${edit.path}: source not retained; cannot validate this file replacement or deletion through the text changeset interface`,
+        );
+      if (edit.content !== null && !/\.(?:[cm]?[jt]sx?|json)$/.test(edit.path))
+        warnings.push(
+          `${edit.path}: language syntax/type validation not available; framework CI must validate this change`,
+        );
+    }
     const changed = new Set(c.edits.map((e) => e.path));
     const impacted = [...impact(g, [...changed], 2).keys()];
     for (const edit of c.edits) {

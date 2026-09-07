@@ -8,6 +8,9 @@ export interface Node {
   end: number;
   subsystem: string;
   exported: boolean;
+  analysis?: string;
+  exclusionReason?: string;
+  bytes?: number;
 }
 export interface Edge {
   from: string;

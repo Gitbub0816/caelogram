@@ -1,0 +1,2 @@
+ALTER TABLE index_jobs ADD COLUMN analyzer_version INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE index_edges ADD COLUMN confidence REAL NOT NULL DEFAULT 1;

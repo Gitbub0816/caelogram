@@ -265,7 +265,7 @@ export default function Connect({
                   : progress.processed}{" "}
                 / {progress.files} files ·{" "}
                 {(progress.sourceBytes / 1_000_000).toFixed(1)} MB discovered ·{" "}
-                {progress.excluded} excluded entries
+                {progress.excluded} metadata-only entries
               </p>
               <p>
                 Progress is saved in the cloud. You can close this page and
