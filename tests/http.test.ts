@@ -47,6 +47,24 @@ test("HTTP authentication, origin checks, demo resolution and MCP lifecycle", as
       headers: { Origin: "https://evil.example" },
     });
     assert.equal(r.status, 403);
+    // The console is served by Vite on whatever port is free, so development
+    // accepts any loopback origin; anything else is still rejected.
+    for (const allowed of [
+      "http://localhost:5199",
+      "http://127.0.0.1:4173",
+      "http://[::1]:3000",
+    ]) {
+      r = await fetch(url + "/api/demo", { headers: { Origin: allowed } });
+      assert.equal(r.status, 200, allowed);
+    }
+    for (const denied of [
+      "http://localhost.evil.example",
+      "https://localhost:5199",
+      "http://notlocalhost:5199",
+    ]) {
+      r = await fetch(url + "/api/demo", { headers: { Origin: denied } });
+      assert.equal(r.status, 403, denied);
+    }
     r = await fetch(url + "/api/demo/task", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

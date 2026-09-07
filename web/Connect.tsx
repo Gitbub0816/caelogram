@@ -49,7 +49,9 @@ export default function Connect({
       const x = await api("/api/github/repositories");
       setRepos(x.repositories);
       setInstallUrl(x.installUrl);
-      setConnected(await api("/api/tools/list_repositories", {}));
+      setConnected(
+        (await api("/api/tools/list_repositories", {})).repositories,
+      );
     });
   useEffect(() => {
     if (identity?.signedIn) void refresh();

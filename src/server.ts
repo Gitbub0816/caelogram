@@ -43,15 +43,20 @@ export function createServer(service: Service, devToken?: string) {
     }),
   );
   const origin = process.env.CAELOGRAM_ORIGIN ?? "http://localhost:4310";
+  // Production pins the single configured origin. Development accepts any
+  // loopback origin: the console is served by Vite on whichever port is free,
+  // and a hardcoded port silently 403s every API call from the browser —
+  // including /api/config, which leaves sign-in unconfigurable.
+  const loopback = /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
   app.use((req, res, next) => {
+    const from = req.headers.origin;
     if (
-      req.headers.origin &&
-      ![
-        origin,
-        ...(!production
-          ? ["http://localhost:5173", "http://terminal.local:4173"]
-          : []),
-      ].includes(req.headers.origin)
+      from &&
+      from !== origin &&
+      !(
+        !production &&
+        (loopback.test(from) || from === "http://terminal.local:4173")
+      )
     )
       return res.status(403).json({ error: "Origin not allowed" });
     next();

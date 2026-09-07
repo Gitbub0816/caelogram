@@ -163,7 +163,7 @@ export default function App({
   const loadRepositories = async () => {
     if (!identity?.signedIn && !localSession) return;
     try {
-      setRepositories(await tool("list_repositories", {}));
+      setRepositories((await tool("list_repositories", {})).repositories);
     } catch {
       // A missing GitHub link is not an error worth interrupting the page for;
       // the Connect page explains it.
@@ -173,7 +173,9 @@ export default function App({
     void loadRepositories();
   }, [identity?.signedIn]);
   const loadRepo = async (id: string) => {
-    const next = await tool("repository_map", { repoId: id });
+    // repository_map is a bounded brief and carries no nodes; the console needs
+    // the first page of the paged map to render anything.
+    const next = await tool("map_page", { repoId: id });
     setData(next);
     setSelected(next.nodes.find((n: any) => n.kind === "file")?.id ?? "");
     setDemo(false);
@@ -564,7 +566,7 @@ export default function App({
                 onSubmit={(e) => {
                   e.preventDefault();
                   void act("Authenticating", async () => {
-                    const repos = await request(
+                    const { repositories: repos } = await request(
                       "/api/tools/list_repositories",
                       {},
                       token,
@@ -577,7 +579,7 @@ export default function App({
                     ).get("repo");
                     if (target && repos.some((r: any) => r.id === target)) {
                       const next = await request(
-                        "/api/tools/repository_map",
+                        "/api/tools/map_page",
                         { repoId: target },
                         token,
                       );
@@ -617,7 +619,9 @@ export default function App({
                       branch,
                       installationId: Number(installation),
                     });
-                    setRepositories(await tool("list_repositories", {}));
+                    setRepositories(
+                      (await tool("list_repositories", {})).repositories,
+                    );
                     await loadRepo(repo.id);
                   });
                 }}
